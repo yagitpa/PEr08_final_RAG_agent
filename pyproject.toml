@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerocoder-assistant"
+version = "0.1.0"
+description = "RAG-ассистент по конспектам курса промпт-инжиниринга Зерокодера"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+    "tiktoken>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+zassist = "zerocoder_assistant.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# Комментарии, строки и docstring в проекте намеренно на русском языке.
+# Правила «неоднозначный Unicode-символ» рассчитаны на англоязычный код и на
+# кириллице дают сплошной ложный шум, скрывая настоящие замечания.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

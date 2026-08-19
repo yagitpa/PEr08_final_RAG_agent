@@ -1,0 +1,24 @@
+# Окружение и секреты
+.env
+.venv/
+venv/
+
+# Артефакты выполнения (пересоздаются из конспектов)
+storage/
+data/raw/
+data/notes/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

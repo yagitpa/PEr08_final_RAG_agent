@@ -1,0 +1,18 @@
+# --- Ядро ---
+click>=8.1              # CLI
+pydantic>=2.0,<3.0      # модели данных
+pydantic-settings>=2.0  # конфигурация из окружения
+python-dotenv>=1.0      # загрузка .env
+PyYAML>=6.0             # frontmatter конспектов, golden set
+tiktoken>=0.7           # подсчёт токенов при чанкинге
+
+# --- Провайдеры и хранилище (этапы 2-3) ---
+# openai>=1.40
+# chromadb>=0.5
+
+# --- Загрузчики форматов (этап 1 добычи) ---
+# beautifulsoup4>=4.12
+# pdfplumber>=0.11
+# python-docx>=1.1
+
+# Оценка через RAGAS ставится отдельно: см. requirements-eval.txt

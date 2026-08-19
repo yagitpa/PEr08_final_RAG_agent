@@ -48,8 +48,62 @@ class TestCleanText:
     def test_links_reduced_to_caption(self, cleaner: TextCleaner) -> None:
         assert cleaner.clean_text("см. [проект](https://example.com/x)") == "см. проект"
 
-    def test_html_tags_removed(self, cleaner: TextCleaner) -> None:
-        assert cleaner.clean_text("<b>Жирный</b> текст") == "Жирный текст"
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("<b>Жирный</b> текст", "Жирный текст"),
+            ('Блок <div class="wrap">внутри</div>', "Блок внутри"),
+            ("Перенос<br/>строки", "Перенос строки"),
+        ],
+    )
+    def test_html_tags_removed(self, cleaner: TextCleaner, source: str, expected: str) -> None:
+        assert cleaner.clean_text(source) == expected
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "1 - нейтрально; <1 - допускает повторы; >1 - избегает их",
+            "вводим команду: ngrok http <нужный-порт>",
+            "нажимаем на кнопку </>",
+            "передаём <task_id> в запрос",
+        ],
+    )
+    def test_angle_brackets_that_are_not_tags_survive(
+        self, cleaner: TextCleaner, source: str
+    ) -> None:
+        """Сравнения и плейсхолдеры — не разметка, а инструкция для студента."""
+        assert cleaner.clean_text(source) == source
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "В файле __init__.py мы видим инициализацию пакета.",
+            "Переменная __name__ равна __main__.",
+            "Файл `__pycache__` не коммитим.",
+            "Используйте `*args` и `**kwargs`.",
+        ],
+    )
+    def test_python_identifiers_survive(self, cleaner: TextCleaner, source: str) -> None:
+        """Дандеры и звёздочки аргументов — термины, по которым будут искать."""
+        assert cleaner.clean_text(source) == source.replace("`", "")
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("вопрос → эмбеддинг → поиск", "вопрос -> эмбеддинг -> поиск"),
+            ("A ⇒ B", "A -> B"),
+            ("клиент ↔ сервер", "клиент <-> сервер"),
+        ],
+    )
+    def test_directional_arrows_normalized(
+        self, cleaner: TextCleaner, source: str, expected: str
+    ) -> None:
+        """Стрелка несёт отношение «из чего во что» — её нормализуют, как тире."""
+        assert cleaner.clean_text(source) == expected
+
+    def test_decorative_arrow_removed(self, cleaner: TextCleaner) -> None:
+        """А диагональная стрелка — просто маркер подзаголовка."""
+        assert cleaner.clean_text("Почему модели выдумывают? ↘️") == "Почему модели выдумывают?"
 
     def test_blockquote_marker_removed(self, cleaner: TextCleaner) -> None:
         assert cleaner.clean_text("> ⚠️ Предупреждение") == "Предупреждение"
@@ -166,7 +220,16 @@ class TestHeadings:
 
     @pytest.mark.parametrize(
         "heading",
-        ["Домашнее задание", "На следующем занятии", "Что мы умеем", "Полезные ссылки"],
+        [
+            "Домашнее задание",
+            "На следующем занятии",
+            "Что мы умеем",
+            "Полезные ссылки",
+            # Варианты оформления из корпуса: к служебному заголовку дописано уточнение.
+            "Что мы умеем (знания из предыдущих уроков)",
+            "Домашнее задание (5 этапов)",
+            "Домашние задания",
+        ],
     )
     def test_service_sections_excluded(self, heading: str) -> None:
         assert is_excluded_section(heading)

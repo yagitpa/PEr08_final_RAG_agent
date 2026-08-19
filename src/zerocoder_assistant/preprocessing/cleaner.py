@@ -26,6 +26,7 @@ from zerocoder_assistant.config.constants import (
     MD_EMPHASIS_PATTERN,
     MD_HRULE_PATTERN,
     MD_IMAGE_PATTERN,
+    MD_INLINE_CODE_PATTERN,
     MD_LINK_PATTERN,
     MD_LIST_MARKER_PATTERN,
     MD_TABLE_DIVIDER_PATTERN,
@@ -35,6 +36,10 @@ from zerocoder_assistant.preprocessing.headings import TRANSLATION_TABLE, normal
 from zerocoder_assistant.preprocessing.models import Block
 
 _INLINE_SPACE_PATTERN = re.compile(r"[ \t]{2,}")
+
+#: Метка для временного изъятия инлайн-кода. Символ U+0000 в тексте конспекта
+#: встретиться не может, поэтому спутать метку с содержимым нельзя.
+_CODE_SENTINEL = "\x00"
 
 
 class TextCleaner:
@@ -90,6 +95,10 @@ class TextCleaner:
         result = MD_IMAGE_PATTERN.sub(r"\1", result)
         result = MD_LINK_PATTERN.sub(r"\1", result)
 
+        # Инлайн-код изымается до всей дальнейшей обработки: внутри него
+        # звёздочки и подчёркивания — часть идентификатора, а не разметка.
+        result, code_spans = self._protect_inline_code(result)
+
         # Порядок принципиален: сначала выделение, потом эмодзи. В обратном
         # порядке «**Текст ↘️**» превращается в «**Текст  **», где перед
         # закрывающим маркером пробел — паттерн выделения его уже не видит,
@@ -102,7 +111,25 @@ class TextCleaner:
         result = MD_HRULE_PATTERN.sub("", result)
         result = MD_LIST_MARKER_PATTERN.sub(r"\1- ", result)
 
-        return self._collapse_whitespace(result)
+        return self._restore_inline_code(self._collapse_whitespace(result), code_spans)
+
+    @staticmethod
+    def _protect_inline_code(text: str) -> tuple[str, list[str]]:
+        """Заменяет `код` на непечатаемые метки, возвращая изъятое содержимое."""
+        spans: list[str] = []
+
+        def replace(match: re.Match[str]) -> str:
+            spans.append(match.group(1))
+            return f"{_CODE_SENTINEL}{len(spans) - 1}{_CODE_SENTINEL}"
+
+        return MD_INLINE_CODE_PATTERN.sub(replace, text), spans
+
+    @staticmethod
+    def _restore_inline_code(text: str, spans: list[str]) -> str:
+        """Возвращает изъятый код на место — уже после всех правок текста."""
+        for index, span in enumerate(spans):
+            text = text.replace(f"{_CODE_SENTINEL}{index}{_CODE_SENTINEL}", span)
+        return text
 
     @staticmethod
     def _strip_emphasis(text: str) -> str:

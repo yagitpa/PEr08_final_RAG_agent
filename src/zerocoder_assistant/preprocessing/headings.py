@@ -16,6 +16,7 @@ import re
 
 from zerocoder_assistant.config.constants import (
     ACTUALIZATION_MARKER,
+    ARROW_TRANSLATIONS,
     BULLET_REPLACEMENT,
     BULLET_VARIANTS,
     CODE_DOMINANCE_RATIO,
@@ -27,7 +28,7 @@ from zerocoder_assistant.config.constants import (
     DASH_REPLACEMENT,
     DASH_VARIANTS,
     EMOJI_PATTERN,
-    EXCLUDED_SECTIONS,
+    EXCLUDED_SECTION_PREFIXES,
     HEADING_NUMBERING_PATTERN,
     INVISIBLE_TRANSLATIONS,
     PRACTICE_HEADING_MARKERS,
@@ -45,10 +46,11 @@ _YO_TABLE = str.maketrans({"ё": "е", "Ё": "Е"})
 
 
 def _build_translation_table() -> dict[int, str]:
-    """Единая таблица посимвольных замен: тире, кавычки, буллеты, невидимые."""
+    """Единая таблица посимвольных замен: тире, стрелки, кавычки, буллеты, невидимые."""
     table: dict[int, str] = {}
     table.update({ord(char): DASH_REPLACEMENT for char in DASH_VARIANTS})
     table.update({ord(char): BULLET_REPLACEMENT for char in BULLET_VARIANTS})
+    table.update({ord(char): value for char, value in ARROW_TRANSLATIONS.items()})
     table.update({ord(char): value for char, value in QUOTE_TRANSLATIONS.items()})
     table.update({ord(char): value for char, value in INVISIBLE_TRANSLATIONS.items()})
     return table
@@ -93,12 +95,22 @@ def normalize_for_match(text: str) -> str:
 def is_excluded_section(heading: str | None) -> bool:
     """Служебная ли это секция (домашнее задание, анонс, список материалов).
 
-    Неизвестный заголовок сохраняется: жёсткий список молча съел бы содержательные
-    разделы, поскольку оформление в корпусе неоднородно.
+    Сопоставление по префиксу: в корпусе к служебным заголовкам дописывают
+    уточнения — «Что мы умеем (знания из предыдущих уроков)», «Домашнее задание
+    (5 этапов)». Неизвестный заголовок сохраняется: жёсткий список молча съел бы
+    содержательные разделы, поскольку оформление в корпусе неоднородно.
     """
     if heading is None:
         return False
-    return normalize_heading(heading) in EXCLUDED_SECTIONS
+    normalized = normalize_heading(heading)
+    return normalized.startswith(EXCLUDED_SECTION_PREFIXES)
+
+
+def is_summary_section(heading: str | None) -> bool:
+    """Резюмирует ли секция текущий урок («Результат дня», «Итоги урока»)."""
+    if heading is None:
+        return False
+    return normalize_heading(heading) in SUMMARY_SECTIONS
 
 
 def classify_content_type(heading: str | None, text: str, code_ratio: float = 0.0) -> str:

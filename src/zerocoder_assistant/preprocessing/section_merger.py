@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from zerocoder_assistant.config.settings import ChunkingConfig
-from zerocoder_assistant.preprocessing.headings import sanitize_heading
+from zerocoder_assistant.preprocessing.headings import is_summary_section, sanitize_heading
 from zerocoder_assistant.preprocessing.models import Block, Section
 from zerocoder_assistant.preprocessing.tokenization import TokenCounter
 
@@ -76,10 +76,18 @@ class SectionMerger:
         return result
 
     def _is_mergeable(self, prepared: PreparedSection) -> bool:
-        """Секция достаточно мелкая и имеет настоящего родителя."""
+        """Секция достаточно мелкая, имеет настоящего родителя и не является резюме.
+
+        Резюме урока («Результат дня», «Итоги урока») не втягивается в группы:
+        объединённая секция берёт заголовок родителя, а тип содержимого
+        определяется по заголовку — то есть слияние стирало бы метку
+        `content_type=summary`. А именно эти чанки отвечают на вопрос
+        «о чём был урок N», и метка нужна им для фильтрации.
+        """
         return (
             prepared.tokens < self._config.target_tokens
             and len(prepared.section.heading_path) >= MIN_MERGEABLE_DEPTH
+            and not is_summary_section(prepared.section.heading)
         )
 
     def _fits(self, group: list[PreparedSection], candidate: PreparedSection) -> bool:

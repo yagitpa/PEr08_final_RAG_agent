@@ -150,7 +150,14 @@ notes_version: 1
 | `select` | Конфигурируемый фильтр секций; неизвестный заголовок сохраняется |
 | `clean` | Эмодзи, HTML-теги, служебные символы, маркеры разметки, схлопывание пробелов; унификация тире; **без** lowercase (кириллица, имена моделей); блоки кода не трогаются |
 | `merge` | Слияние мелких соседних секций-сестёр под общим родителем |
-| `chunk` | Секция как единица → абзацы → предложения; 300–500 токенов (`tiktoken`); overlap 15% целыми предложениями; contextual header; код атомарен |
+| `chunk` | Секция как единица → абзацы → предложения; целевой размер 300–500 токенов (`tiktoken`); overlap 15% целыми предложениями; contextual header; код атомарен |
+
+**300–500 токенов — это цель, а не жёсткий коридор.** Секция короче целевого
+размера искусственно не добивается и не выбрасывается: определение термина на
+60 токенов — плотное знание, а не брак. Нижняя граница отчёта задаётся
+`CHUNK_MIN_TOKENS` (по умолчанию 80) и служит для двух вещей — слияния мелких
+черновиков и подсветки в статистике. Превышать `CHUNK_MAX_TOKENS` вправе только
+неделимый листинг.
 | `embed` | Батчи, кэш по `content_hash` |
 | `upsert` | Chroma, `id = {source_file}:s{ordinal}:c{index}`, идемпотентно |
 
@@ -222,7 +229,8 @@ PEr08_final_RAG_agent/
 │  ├─ config/                     # settings.py (pydantic-settings), constants.py
 │  ├─ acquisition/                # base, browser_handoff, html, pdf, docx
 │  ├─ authoring/                  # note_builder
-│  ├─ preprocessing/              # md_parser, section_filter, cleaner, chunker
+│  ├─ preprocessing/              # markdown, headings, cleaner, section_merger,
+│  │                              # chunker, metadata, models, tokenization, pipeline
 │  ├─ embeddings/                 # base, openai_compatible, factory
 │  ├─ llm/                        # base, openai_compatible, factory
 │  ├─ vectorstore/                # chroma_store, manifest
@@ -241,11 +249,12 @@ PEr08_final_RAG_agent/
 **CLI:**
 
 ```
-notes build --raw <file> [--lesson PEr08]
-index build [--rebuild] | index stats
-ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache] | ask --repl
-eval run [--ragas]
-cache stats | cache clear
+index preview [--lesson PEr08] [--limit N] [--export chunks.jsonl]   # этап 1, готово
+notes build --raw <file> [--lesson PEr08]                            # этап 1 авторства
+index build [--rebuild] | index stats                                # этап 3
+ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache]  # этап 4-5
+eval run [--ragas]                                                   # этап 7-8
+cache stats | cache clear                                            # этап 4
 ```
 
 **Окружение (`.env`):** ключи и `base_url` провайдеров, `NOTES_DIR`, `CHROMA_DIR`, `CACHE_DB`, `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_PCT`, `TOP_K`, `OVERFETCH_FACTOR`, `RELEVANCE_THRESHOLD`, `MAX_CONTEXT_TOKENS`, `HISTORY_PAIRS`, `TEMPERATURE`, `LOG_LEVEL`. Списки секций-исключений и паттерны очистки — в `constants.py` (это не секреты, но и не хардкод по месту).

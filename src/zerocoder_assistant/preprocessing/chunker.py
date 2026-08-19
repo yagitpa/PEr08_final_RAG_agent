@@ -212,6 +212,10 @@ class Chunker:
         Мелкий чанк не выбрасывается: потерять содержимое хуже, чем оставить
         короткий фрагмент. Если склейка не влезает — он остаётся как есть и
         попадает в отчёт как выход за коридор размеров.
+
+        Перенесённое перекрытие при склейке отбрасывается: его атомы уже стоят
+        в конце предыдущего чанка, и приклеить их повторно значило бы получить
+        один и тот же текст дважды внутри одного фрагмента.
         """
         if len(drafts) < 2:
             return drafts
@@ -219,13 +223,30 @@ class Chunker:
         merged: list[_Draft] = [drafts[0]]
         for draft in drafts[1:]:
             previous = merged[-1]
-            fits = previous.tokens + draft.tokens <= maximum
-            if draft.tokens < self._config.min_tokens and fits:
-                for atom in draft.atoms:
+            addable = draft.atoms[self._carried_over(previous, draft) :]
+            tokens = sum(self._counter.count(atom.text) for atom in addable)
+
+            if draft.tokens < self._config.min_tokens and previous.tokens + tokens <= maximum:
+                for atom in addable:
                     previous.add(atom, self._counter.count(atom.text))
                 continue
             merged.append(draft)
         return merged
+
+    @staticmethod
+    def _carried_over(previous: _Draft, draft: _Draft) -> int:
+        """Сколько ведущих атомов черновика — это перекрытие из предыдущего.
+
+        Сравнение по идентичности: перекрытие переносится теми же объектами,
+        поэтому совпадение по `is` надёжнее сравнения текстов (одинаковый абзац
+        может встретиться в секции и сам по себе).
+        """
+        carried = 0
+        for atom in draft.atoms:
+            if not any(atom is earlier for earlier in previous.atoms):
+                break
+            carried += 1
+        return carried
 
     def _build_chunk(
         self,

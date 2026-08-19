@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from zerocoder_assistant.config.settings import ChunkingConfig
-from zerocoder_assistant.preprocessing.chunker import Chunker
-from zerocoder_assistant.preprocessing.models import Block, NoteMetadata, Section
+from zerocoder_assistant.preprocessing.chunker import BODY_SEPARATOR, Chunker
+from zerocoder_assistant.preprocessing.markdown import split_sentences
+from zerocoder_assistant.preprocessing.models import Block, Chunk, NoteMetadata, Section
 from zerocoder_assistant.preprocessing.section_merger import PreparedSection, SectionMerger
 from zerocoder_assistant.preprocessing.tokenization import get_token_counter
 
@@ -101,13 +102,48 @@ class TestCodeAtomicity:
 
 
 class TestOverlap:
+    @staticmethod
+    def _body(chunk: Chunk) -> str:
+        """Тело чанка без contextual header."""
+        return chunk.text.split(BODY_SEPARATOR, 1)[-1]
+
     def test_consecutive_chunks_share_tail(self, chunker: Chunker, note: NoteMetadata) -> None:
+        """Проверяем перенос целого предложения, а не пересечение множеств слов.
+
+        Сравнение слов проходило бы и при полностью выключенном перекрытии:
+        у соседних чанков одинаковый contextual header и общая лексика.
+        """
         sentences = [f"Предложение номер {i} про устройство RAG-системы." for i in range(60)]
         chunks = chunker.chunk_section([Block(" ".join(sentences))], make_section(), note)
 
         assert len(chunks) > 1
-        tail_words = set(chunks[0].text.split())
-        assert tail_words & set(chunks[1].text.split())
+        last_sentence = split_sentences(self._body(chunks[0]))[-1]
+        assert last_sentence in chunks[1].text
+
+    def test_overlap_stays_within_budget(
+        self, chunker: Chunker, chunking: ChunkingConfig, note: NoteMetadata
+    ) -> None:
+        """Перекрытие не должно разрастаться: это прямые лишние токены."""
+        sentences = [f"Предложение номер {i} про устройство RAG-системы." for i in range(60)]
+        chunks = chunker.chunk_section([Block(" ".join(sentences))], make_section(), note)
+        counter = get_token_counter(chunking.encoding)
+
+        first = set(split_sentences(self._body(chunks[0])))
+        carried = [s for s in split_sentences(self._body(chunks[1])) if s in first]
+
+        assert sum(counter.count(s) for s in carried) <= chunking.overlap_tokens
+
+    def test_no_sentence_repeats_inside_a_chunk(self, chunker: Chunker, note: NoteMetadata) -> None:
+        """Слияние мелкого чанка не должно приклеивать перенесённое перекрытие дважды."""
+        sentences = [
+            f"Предложение номер {i} про устройство RAG-системы и векторный поиск."
+            for i in range(55)
+        ]
+        chunks = chunker.chunk_section([Block(" ".join(sentences))], make_section(), note)
+
+        for chunk in chunks:
+            body = split_sentences(self._body(chunk))
+            assert len(body) == len(set(body)), f"повтор внутри {chunk.chunk_id}"
 
     def test_zero_overlap_disables_carryover(self, note: NoteMetadata) -> None:
         config = ChunkingConfig(overlap_pct=0)
@@ -125,13 +161,15 @@ class TestSectionMerger:
         return SectionMerger(chunking, get_token_counter(chunking.encoding))
 
     @staticmethod
-    def prepared(name: str, tokens: int, parent: str = "Теория") -> PreparedSection:
+    def prepared(
+        name: str, tokens: int, parent: str = "Теория", ordinal: int = 0
+    ) -> PreparedSection:
         section = Section(
             heading=name,
             level=3,
             heading_path=("Урок", parent, name),
             body="",
-            ordinal=hash(name) % 100,
+            ordinal=ordinal,
         )
         return PreparedSection(section=section, blocks=[Block(SENTENCE)], tokens=tokens)
 
@@ -166,6 +204,15 @@ class TestSectionMerger:
         result = merger.merge([self.prepared(f"Раздел {i}", 150) for i in range(6)])
 
         assert all(item.tokens <= chunking.target_tokens for item in result)
+
+    def test_summary_section_never_merged(self, merger: SectionMerger) -> None:
+        """Слияние стёрло бы метку summary: тип определяется по заголовку группы."""
+        result = merger.merge(
+            [self.prepared("Результат дня", 70), self.prepared("Чат", 70, ordinal=1)]
+        )
+
+        assert len(result) == 2
+        assert result[0].section.heading == "Результат дня"
 
     def test_top_level_sections_not_merged(self, merger: SectionMerger) -> None:
         """У секций верхнего уровня нет общего родителя, кроме документа."""

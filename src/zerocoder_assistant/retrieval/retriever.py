@@ -53,10 +53,21 @@ class RetrievedChunk:
 
     @property
     def source(self) -> str:
-        """Человекочитаемая ссылка на источник для показа пользователю."""
+        """Человекочитаемая ссылка на источник для показа пользователю.
+
+        Номер части обязателен, когда секция разбита на несколько чанков: в
+        выдаче их запросто окажется три подряд, и без номера три строки списка
+        источников выглядят как одна повторённая трижды.
+        """
         lesson = self.metadata.get("lesson_id")
         section = self.metadata.get("section_title") or self.metadata.get("lesson_title")
-        return f"{lesson} > {section}" if lesson else str(section or self.chunk_id)
+        place = f"{lesson} > {section}" if lesson else str(section or self.chunk_id)
+
+        parts = self.metadata.get("chunks_in_section") or 1
+        if parts > 1:
+            index = int(self.metadata.get("chunk_index", 0)) + 1
+            return f"{place} (часть {index}/{parts})"
+        return place
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -147,7 +158,7 @@ class Retriever:
         Пустой результат — законный исход, а не сбой: он означает, что в базе
         знаний нет ничего достаточно близкого.
         """
-        params = self._params(top_k, where)
+        params = self.params(top_k, where)
         timings: dict[str, float] = {}
 
         if use_cache and self._cache is not None:
@@ -201,7 +212,13 @@ class Retriever:
         if reason:
             raise IndexMismatchError(reason)
 
-    def _params(self, top_k: int | None, where: dict[str, Any] | None) -> RetrievalParams:
+    def params(self, top_k: int | None, where: dict[str, Any] | None) -> RetrievalParams:
+        """Отпечаток параметров поиска.
+
+        Публичный: тот же отпечаток входит в ключ кэша ответов, и генератору
+        нужно уметь заглянуть в него до поиска — иначе попадание в L3 не сможет
+        пропустить всю цепочку целиком.
+        """
         return RetrievalParams(
             embed_model=self._embedder.model_id,
             top_k=top_k or self._settings.top_k,

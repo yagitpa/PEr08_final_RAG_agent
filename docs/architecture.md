@@ -200,6 +200,20 @@ query → normalize
 
 Возврат `timings` — не украшение: он делает выигрыш кэша измеримым и закрывает тему оптимизации из PEr07 числами, а не рассуждениями.
 
+**Уточнения, добавленные при реализации (этап 5).**
+
+*Уточняющий вопрос ищется не так, как задаётся.* «А сколько его ставить?» модель поймёт из истории — история едет в запрос целиком. Но эмбеддинг этой фразы не найдёт в базе ничего: предметных слов в ней нет, всё содержание осталось в предыдущей реплике. Поэтому в **поисковый** запрос подмешивается предыдущий вопрос. Признак уточнения — два условия сразу: отсылка наружу (союз-связка в начале либо местоимение) **и** краткость (не больше `FOLLOW_UP_MAX_WORDS` слов). Одной отсылки мало: «что такое overlap и зачем он нужен?» содержит «он», но находится сам. Расширять запрос отдельным вызовом модели не стали — это лишний запрос на каждую реплику ради случая, который закрывается списком слов (и это прямо в списке «сознательно не делаем»).
+
+*Фрагменты едут в сообщении пользователя, а не в системном.* Корпус — конспекты курса по промпт-инжинирингу: в нём буквально лежат образцы системных промптов, инструкции для других моделей и разборы атак на них. Системное сообщение — это то, что модель исполняет; фрагментам там не место, даже когда так короче.
+
+*Версия промпта — хеш содержимого, а не номер в имени файла.* Номер надо помнить поднять, хеш меняется сам. Он входит в ключ L3, поэтому правка промпта промахивается мимо ответов, посчитанных по прежней редакции, вместо того чтобы месяц отдавать их как свежие.
+
+*Бюджет контекста режется целыми фрагментами.* Обрезка чанка посередине экономит токены, но отрезает конец мысли — модель видит начало определения без сути и договаривает сама. Исключение одно: если бюджет меньше одного чанка, фрагмент урезается, потому что отдать пустоту на найденный ответ хуже.
+
+*Список источников печатает программа и нумерует его 1:1 с фрагментами.* Ссылка `[3]` в ответе обязана находиться третьей строкой списка, иначе номер бесполезен. Отсюда же дешёвая проверка обоснованности: ссылка на `[7]` при пяти фрагментах — выдумка, и она попадает в лог и в отчёт (ответ при этом не правится: правка чужого текста регуляркой испортит его вернее, чем лишняя ссылка).
+
+*Отказ «в конспектах этого нет» в историю не кладётся.* Предмета разговора он не добавляет, а следующий уточняющий вопрос утянет его в поисковый запрос и испортит выдачу.
+
 ### P4. Оценка
 
 Golden set в YAML: вопрос, ожидаемые `lesson_id`, флаг «ответа в базе нет». Встроенные метрики + опциональный RAGAS.
@@ -222,10 +236,10 @@ PEr08_final_RAG_agent/
 ├─ README.md                      # схема пайплайна, запуск, параметры
 ├─ .env.example  .gitignore  pyproject.toml
 ├─ requirements.txt  requirements-eval.txt
-├─ prompts/                       # note_author_v1.md, rag_answer_v1.md
+├─ prompts/                       # rag_answer_v1.md (+ note_author_v1.md, этап авторства)
 ├─ src/zerocoder_assistant/
 │  ├─ __main__.py                 # точка входа CLI
-│  ├─ cli/                        # notes | index | ask | eval | cache
+│  ├─ cli/                        # notes | index | search | ask | eval | cache, options
 │  ├─ config/                     # settings.py (pydantic-settings), constants.py
 │  ├─ acquisition/                # base, browser_handoff, html, pdf, docx
 │  ├─ authoring/                  # note_builder
@@ -234,9 +248,9 @@ PEr08_final_RAG_agent/
 │  ├─ embeddings/                 # base, openai_compatible, factory
 │  ├─ llm/                        # base, openai_compatible, factory
 │  ├─ vectorstore/                # chroma_store, manifest
-│  ├─ retrieval/                  # retriever (overfetch/threshold/dedup/filters)
-│  ├─ generation/                 # context_builder, answerer
-│  ├─ memory/                     # session_history
+│  ├─ retrieval/                  # retriever, dedup, filters
+│  ├─ generation/                 # prompts, context_builder, answerer
+│  ├─ memory/                     # session_history, follow_up
 │  ├─ cache/                      # sqlite_cache (3 таблицы), keys
 │  ├─ evaluation/                 # builtin_metrics, ragas_runner, golden_set.yaml
 │  └─ observability/              # logging, timers
@@ -253,12 +267,13 @@ index preview [--lesson PEr08] [--limit N] [--export chunks.jsonl]   # гото�
 index build [--rebuild] [--lesson PEr08] [--dry-run] | index stats   # готово
 search "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--full]     # готово
 cache stats | cache clear [--level embeddings|retrieval|answers]     # готово
+ask "вопрос" [--lesson PEr06] [--top-k 5] [--no-cache] [--verbose]   # готово
+ask --repl [те же фильтры]        # диалог с памятью, /clear /help /exit  # готово
 notes build --raw <file> [--lesson PEr08]                            # этап 1 авторства
-ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache]  # этап 5
 eval run [--ragas]                                                   # этап 7-8
 ```
 
-**Окружение (`.env`):** ключи и `base_url` провайдеров, `NOTES_DIR`, `CHROMA_DIR`, `CACHE_DB`, `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_PCT`, `TOP_K`, `OVERFETCH_FACTOR`, `RELEVANCE_THRESHOLD`, `MAX_CONTEXT_TOKENS`, `HISTORY_PAIRS`, `TEMPERATURE`, `LOG_LEVEL`. Списки секций-исключений и паттерны очистки — в `constants.py` (это не секреты, но и не хардкод по месту).
+**Окружение (`.env`):** ключи и `base_url` провайдеров, `NOTES_DIR`, `CHROMA_DIR`, `CACHE_DB`, `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_PCT`, `TOP_K`, `OVERFETCH_FACTOR`, `RELEVANCE_THRESHOLD`, `MAX_CONTEXT_TOKENS`, `MAX_ANSWER_TOKENS`, `HISTORY_PAIRS`, `FOLLOW_UP_LOOKBACK`, `PROMPTS_DIR`, `ANSWER_PROMPT_FILE`, `TEMPERATURE`, `LOG_LEVEL`. Списки секций-исключений и паттерны очистки — в `constants.py` (это не секреты, но и не хардкод по месту).
 
 ---
 

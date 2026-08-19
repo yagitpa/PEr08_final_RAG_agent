@@ -30,6 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
 
     from zerocoder_assistant.cache.sqlite_cache import CacheStats
     from zerocoder_assistant.config.settings import ChunkingConfig
+    from zerocoder_assistant.generation.answerer import Answer
     from zerocoder_assistant.indexing.builder import IndexReport
     from zerocoder_assistant.preprocessing.models import Chunk, ProcessedNote
     from zerocoder_assistant.retrieval.retriever import RetrievalResult
@@ -360,6 +361,60 @@ def render_search_result(result: RetrievalResult, *, full: bool = False) -> str:
         lines.append(_indent(body))
 
     return "\n".join(lines)
+
+
+def render_answer(answer: Answer, *, verbose: bool = False) -> str:
+    """Ответ ассистента и его происхождение.
+
+    Список источников печатает программа, а не модель: только так он совпадает
+    с фрагментами, которые действительно уехали в контекст. Модель в это время
+    занята текстом ответа и о том, что осталось за границей бюджета, не знает.
+    """
+    lines: list[str] = [answer.text.strip(), ""]
+
+    if answer.sources:
+        lines.append("Источники:")
+        for position, source in enumerate(answer.sources, 1):
+            lines.append(f"{INDENT}{position}. {source}")
+
+    if answer.unknown_citations:
+        invented = ", ".join(f"[{number}]" for number in answer.unknown_citations)
+        lines.append("")
+        lines.append(f"ВНИМАНИЕ: модель сослалась на несуществующие фрагменты {invented}.")
+
+    if not verbose:
+        return "\n".join(lines).rstrip()
+
+    lines.append("")
+    lines.extend(_answer_diagnostics(answer))
+    return "\n".join(lines).rstrip()
+
+
+def _answer_diagnostics(answer: Answer) -> list[str]:
+    """Подробности прогона: откуда взят ответ, чем искали, сколько это стоило."""
+    lines: list[str] = []
+    if answer.rewritten_search and answer.search_query is not None:
+        lines.append(_field("Искали по", answer.search_query.replace("\n", " / ")))
+
+    if answer.from_cache:
+        lines.append(_field("Источник", "кэш (L3)"))
+    elif answer.retrieval is not None:
+        result = answer.retrieval
+        lines.append(
+            _field(
+                "Отбор",
+                f"кандидатов {result.candidates} | ниже порога {result.below_threshold} | "
+                f"дублей {result.duplicates} | отобрано {len(result.chunks)}",
+            )
+        )
+        context = f"{answer.used_fragments} фрагм. | {answer.context_tokens} ток."
+        if answer.dropped_fragments:
+            context += f" | не поместилось {answer.dropped_fragments}"
+        lines.append(_field("Контекст", context))
+
+    if answer.timings_ms:
+        lines.append(_field("Время", _render_timings(answer.timings_ms)))
+    return lines
 
 
 def render_cache_stats(stats: CacheStats, path: Path | None = None) -> str:

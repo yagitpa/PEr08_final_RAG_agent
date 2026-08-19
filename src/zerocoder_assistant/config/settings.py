@@ -116,7 +116,13 @@ class Settings(BaseSettings):
     # --- Поиск и генерация (этапы 4-5) --------------------------------------
     top_k: int = Field(default=5, ge=1, le=50)
     overfetch_factor: int = Field(default=3, ge=1, le=10)
-    relevance_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    # Калибровка на 16 вопросах по собранному корпусу: минимальное сходство у
+    # вопроса, ответ на который в базе ЕСТЬ, — 0.364; максимальное у постороннего
+    # вопроса — 0.309. Зазор между классами всего 0.055, порог стоит в его
+    # середине. Смещён в сторону «пропустить лишнее», а не «отказать зря»:
+    # слабый фрагмент модель отсеет сама, а ложный отказ окончателен.
+    relevance_threshold: float = Field(default=0.33, ge=0.0, le=1.0)
+    dedup_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     max_context_tokens: int = Field(default=3000, ge=200)
     history_pairs: int = Field(default=5, ge=0, le=50)
 

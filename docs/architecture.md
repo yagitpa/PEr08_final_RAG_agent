@@ -251,10 +251,11 @@ PEr08_final_RAG_agent/
 ```
 index preview [--lesson PEr08] [--limit N] [--export chunks.jsonl]   # готово
 index build [--rebuild] [--lesson PEr08] [--dry-run] | index stats   # готово
+search "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--full]     # готово
+cache stats | cache clear [--level embeddings|retrieval|answers]     # готово
 notes build --raw <file> [--lesson PEr08]                            # этап 1 авторства
-ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache]  # этап 4-5
+ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache]  # этап 5
 eval run [--ragas]                                                   # этап 7-8
-cache stats | cache clear                                            # этап 4
 ```
 
 **Окружение (`.env`):** ключи и `base_url` провайдеров, `NOTES_DIR`, `CHROMA_DIR`, `CACHE_DB`, `LLM_MODEL`, `EMBED_MODEL`, `CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_PCT`, `TOP_K`, `OVERFETCH_FACTOR`, `RELEVANCE_THRESHOLD`, `MAX_CONTEXT_TOKENS`, `HISTORY_PAIRS`, `TEMPERATURE`, `LOG_LEVEL`. Списки секций-исключений и паттерны очистки — в `constants.py` (это не секреты, но и не хардкод по месту).

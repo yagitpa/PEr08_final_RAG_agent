@@ -25,11 +25,14 @@ from zerocoder_assistant.config.constants import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
+    from pathlib import Path
 
+    from zerocoder_assistant.cache.sqlite_cache import CacheStats
     from zerocoder_assistant.config.settings import ChunkingConfig
     from zerocoder_assistant.indexing.builder import IndexReport
     from zerocoder_assistant.preprocessing.models import Chunk, ProcessedNote
+    from zerocoder_assistant.retrieval.retriever import RetrievalResult
     from zerocoder_assistant.vectorstore.manifest import IndexManifest
 
 # ---------------------------------------------------------------------------
@@ -64,6 +67,13 @@ INDENT: Final[str] = "  "
 ELLIPSIS: Final[str] = "..."
 
 EMPTY_HISTOGRAM_LINE: Final[str] = "(чанков нет - гистограмма не строится)"
+
+#: Пустая выдача — законный ответ, а не сбой: в базе знаний нет ничего
+#: достаточно близкого, и модель в этом случае не вызывается.
+EMPTY_RESULT_LINE: Final[str] = (
+    "Ничего подходящего не найдено: все кандидаты ниже порога релевантности.\n"
+    "Это ответ «в базе знаний такого нет», а не ошибка."
+)
 
 #: Порядок типов содержимого в отчёте: от самого массового к самому редкому по
 #: корпусу. Фиксирован намеренно — сортировка по частоте меняла бы порядок строк
@@ -315,6 +325,61 @@ def render_index_status(
         lines.append(f"ВНИМАНИЕ: {reason}")
 
     return "\n".join(lines)
+
+
+def render_search_result(result: RetrievalResult, *, full: bool = False) -> str:
+    """Результаты поиска: что отобрано, с каким сходством и откуда.
+
+    Строка про отсев показывается всегда, даже когда ничего не отсеялось: по ней
+    видно, работает ли порог и не режет ли он лишнее.
+    """
+    lines = [_field("Запрос", result.query)]
+
+    if result.from_cache:
+        lines.append(_field("Источник", "кэш (L2)"))
+    else:
+        lines.append(
+            _field(
+                "Отбор",
+                f"кандидатов {result.candidates} | ниже порога {result.below_threshold} | "
+                f"дублей {result.duplicates} | отобрано {len(result.chunks)}",
+            )
+        )
+        if result.timings_ms:
+            lines.append(_field("Время", _render_timings(result.timings_ms)))
+
+    if result.is_empty:
+        lines.append("")
+        lines.append(EMPTY_RESULT_LINE)
+        return "\n".join(lines)
+
+    for position, chunk in enumerate(result.chunks, 1):
+        body = chunk.text if full else _truncate(chunk.text, DEFAULT_SAMPLE_CHARS)
+        lines.append("")
+        lines.append(f"{position}. [{chunk.similarity:.3f}] {chunk.source}")
+        lines.append(_indent(body))
+
+    return "\n".join(lines)
+
+
+def render_cache_stats(stats: CacheStats, path: Path | None = None) -> str:
+    """Сколько записей лежит на каждом уровне кэша."""
+    lines = [
+        _field("L1 эмбеддинги", stats.embeddings),
+        _field("L2 результаты поиска", stats.retrievals),
+        _field("L3 ответы", stats.answers),
+        _field("Всего", stats.total),
+        _field("Размер файла", f"{stats.size_bytes / 1024:.1f} КБ"),
+    ]
+    if path is not None:
+        lines.append(_field("Файл", str(path)))
+    return "\n".join(lines)
+
+
+def _render_timings(timings: Mapping[str, float]) -> str:
+    order = ("embed", "search", "llm", "total")
+    known = [f"{name} {timings[name]:.0f} мс" for name in order if name in timings]
+    return " | ".join(known)
 
 
 def render_chunk_sample(chunk: Chunk, *, max_chars: int = DEFAULT_SAMPLE_CHARS) -> str:

@@ -1,0 +1,201 @@
+"""
+Кэш на SQLite: три уровня из PEr07 в одном файле, тремя таблицами.
+
+| Уровень | Что хранит | Что пропускает |
+|---|---|---|
+| L1 | вектор запроса | обращение к API эмбеддингов |
+| L2 | результаты поиска | векторизацию и поиск по базе |
+| L3 | готовый ответ | всю цепочку целиком |
+
+Уровни независимы: попадание в L2 избавляет и от L1, но промах в L3 не мешает
+попасть в L2. Поэтому даже на новом вопросе, похожем по параметрам на прежний,
+часть работы всё равно пропускается.
+
+**L3 сознательно не хранит ответы, посчитанные с историей диалога.** Ответ на
+«а подробнее про это?» зависит от предыдущих реплик, а ключ кэша про них ничего
+не знает — сохранить такой ответ значит начать врать при следующем совпадении
+формулировки. Уровни L1 и L2 от истории не зависят и кешируются всегда.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from array import array
+from collections.abc import Sequence
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+#: Векторы хранятся как упакованные float32, а не как JSON: 1536 чисел занимают
+#: 6 КБ вместо ~30 КБ. Точность float32 совпадает с той, что и так использует
+#: векторное хранилище, так что потерь нет.
+_VECTOR_TYPE = "f"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS query_embeddings (
+    key         TEXT PRIMARY KEY,
+    query       TEXT NOT NULL,
+    embed_model TEXT NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS retrievals (
+    key        TEXT PRIMARY KEY,
+    query      TEXT NOT NULL,
+    params     TEXT NOT NULL,
+    hits       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS answers (
+    key        TEXT PRIMARY KEY,
+    query      TEXT NOT NULL,
+    params     TEXT NOT NULL,
+    answer     TEXT NOT NULL,
+    sources    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
+_TABLES = ("query_embeddings", "retrievals", "answers")
+
+
+@dataclass(frozen=True, slots=True)
+class CacheStats:
+    """Сколько записей лежит на каждом уровне."""
+
+    embeddings: int
+    retrievals: int
+    answers: int
+    size_bytes: int
+
+    @property
+    def total(self) -> int:
+        return self.embeddings + self.retrievals + self.answers
+
+
+class SqliteCache:
+    """Кэш запросов, поиска и ответов."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as connection:
+            connection.executescript(SCHEMA)
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path)
+
+    # -- L1: векторы запросов ---------------------------------------------
+
+    def get_embedding(self, key: str) -> list[float] | None:
+        row = self._fetch("SELECT vector FROM query_embeddings WHERE key = ?", key)
+        if row is None:
+            return None
+        vector = array(_VECTOR_TYPE)
+        vector.frombytes(row[0])
+        return list(vector)
+
+    def set_embedding(
+        self, key: str, query: str, embed_model: str, vector: Sequence[float]
+    ) -> None:
+        self._write(
+            "INSERT OR REPLACE INTO query_embeddings (key, query, embed_model, vector, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (key, query, embed_model, array(_VECTOR_TYPE, vector).tobytes(), _now()),
+        )
+
+    # -- L2: результаты поиска --------------------------------------------
+
+    def get_retrieval(self, key: str) -> list[dict[str, Any]] | None:
+        row = self._fetch("SELECT hits FROM retrievals WHERE key = ?", key)
+        return json.loads(row[0]) if row else None
+
+    def set_retrieval(
+        self, key: str, query: str, params: str, hits: Sequence[dict[str, Any]]
+    ) -> None:
+        self._write(
+            "INSERT OR REPLACE INTO retrievals (key, query, params, hits, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (key, query, params, json.dumps(list(hits), ensure_ascii=False), _now()),
+        )
+
+    # -- L3: готовые ответы ------------------------------------------------
+
+    def get_answer(self, key: str) -> tuple[str, list[str]] | None:
+        row = self._fetch("SELECT answer, sources FROM answers WHERE key = ?", key)
+        return (row[0], json.loads(row[1])) if row else None
+
+    def set_answer(
+        self, key: str, query: str, params: str, answer: str, sources: Sequence[str]
+    ) -> None:
+        self._write(
+            "INSERT OR REPLACE INTO answers (key, query, params, answer, sources, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (key, query, params, answer, json.dumps(list(sources), ensure_ascii=False), _now()),
+        )
+
+    # -- обслуживание ------------------------------------------------------
+
+    def stats(self) -> CacheStats:
+        with closing(self._connect()) as connection:
+            counts = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in _TABLES
+            }
+        return CacheStats(
+            embeddings=counts["query_embeddings"],
+            retrievals=counts["retrievals"],
+            answers=counts["answers"],
+            size_bytes=self.path.stat().st_size if self.path.exists() else 0,
+        )
+
+    def clear(self, level: str | None = None) -> int:
+        """Очищает кэш целиком или один уровень. Возвращает число удалённых записей."""
+        tables = _TABLES if level is None else (_resolve_table(level),)
+        removed = 0
+        with closing(self._connect()) as connection:
+            for table in tables:
+                removed += connection.execute(f"DELETE FROM {table}").rowcount
+            connection.commit()
+            connection.execute("VACUUM")
+        logger.info("Из кэша удалено записей: %d", removed)
+        return removed
+
+    # -- низкий уровень ----------------------------------------------------
+
+    def _fetch(self, sql: str, key: str) -> tuple[Any, ...] | None:
+        with closing(self._connect()) as connection:
+            return connection.execute(sql, (key,)).fetchone()
+
+    def _write(self, sql: str, values: tuple[Any, ...]) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(sql, values)
+            connection.commit()
+
+
+#: Понятные имена уровней для команды `cache clear --level`.
+LEVEL_TABLES = {
+    "embeddings": "query_embeddings",
+    "retrieval": "retrievals",
+    "answers": "answers",
+}
+
+
+def _resolve_table(level: str) -> str:
+    table = LEVEL_TABLES.get(level)
+    if table is None:
+        raise ValueError(f"Неизвестный уровень кэша {level!r}. Доступны: {', '.join(LEVEL_TABLES)}")
+    return table
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")

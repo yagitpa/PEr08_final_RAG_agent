@@ -28,7 +28,9 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from collections.abc import Iterable, Sequence
 
     from zerocoder_assistant.config.settings import ChunkingConfig
+    from zerocoder_assistant.indexing.builder import IndexReport
     from zerocoder_assistant.preprocessing.models import Chunk, ProcessedNote
+    from zerocoder_assistant.vectorstore.manifest import IndexManifest
 
 # ---------------------------------------------------------------------------
 # Параметры представления
@@ -243,6 +245,74 @@ def render_stats(stats: CorpusStats, config: ChunkingConfig) -> str:
                 for chunk_id, count in stats.duplicate_chunk_ids[:TOP_DUPLICATE_IDS]
             )
         )
+
+    return "\n".join(lines)
+
+
+def render_index_report(report: IndexReport) -> str:
+    """Итог сборки индекса.
+
+    Отдельно показывается, сколько чанков реально векторизовано: это единственная
+    платная операция во всём конвейере, и её объём должен быть виден сразу.
+    """
+    lines = [
+        _field("Коллекция", report.collection),
+        _field("Конспектов", report.notes),
+        _field("Чанков", report.chunks),
+        _field(
+            "Изменения",
+            f"добавлено {report.added} | обновлено {report.updated} | "
+            f"без изменений {report.unchanged} | удалено {report.removed}",
+        ),
+    ]
+
+    if report.dry_run:
+        lines.append(_field("Режим", "сухой прогон, ничего не записано"))
+        lines.append(_field("К векторизации", report.added + report.updated))
+    else:
+        lines.append(_field("Векторизовано", report.embedded))
+
+    lines.append(_field("Время", f"{report.duration_seconds:.1f} с"))
+
+    for reason in report.staleness:
+        lines.append(f"ВНИМАНИЕ: {reason}")
+
+    if report.failed_files:
+        lines.append(f"Сбоев при обработке: {len(report.failed_files)}")
+        lines.extend(_rows((name, reason[:60]) for name, reason in report.failed_files))
+
+    return "\n".join(lines)
+
+
+def render_index_status(
+    manifest: IndexManifest | None,
+    vectors: int,
+    staleness: Sequence[str] = (),
+) -> str:
+    """Состояние собранного индекса."""
+    if manifest is None:
+        return "Индекс не собран. Выполните: zassist index build"
+
+    lines = [
+        _field("Коллекция", manifest.collection),
+        _field("Векторов в базе", vectors),
+        _field("Модель эмбеддингов", f"{manifest.embed_model} ({manifest.embed_provider})"),
+        _field("Размерность", manifest.dimension),
+        _field("Чанков при сборке", f"{manifest.chunks} из {manifest.notes} конспектов"),
+        _field(
+            "Чанкинг",
+            f"target {manifest.chunk_target_tokens} | max {manifest.chunk_max_tokens} | "
+            f"min {manifest.chunk_min_tokens} | overlap {manifest.chunk_overlap_pct}% | "
+            f"{manifest.tokenizer_encoding}",
+        ),
+        _field("Версия препроцессинга", manifest.preprocessing_version),
+        _field("Собран", manifest.built_at),
+    ]
+
+    if vectors != manifest.chunks:
+        lines.append(f"ВНИМАНИЕ: в базе {vectors} векторов, а манифест обещает {manifest.chunks}")
+    for reason in staleness:
+        lines.append(f"ВНИМАНИЕ: {reason}")
 
     return "\n".join(lines)
 

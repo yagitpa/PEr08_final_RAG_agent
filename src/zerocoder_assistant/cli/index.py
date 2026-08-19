@@ -1,10 +1,12 @@
 """
 Команды группы `index` — всё, что относится к превращению конспектов в индекс.
 
-Сейчас здесь одна команда, `preview`: сухой прогон препроцессинга без обращения
-к эмбеддеру и хранилищу. Это инструмент верификации этапа 1 (docs/architecture.md,
-«Верификация», п. 1) и одновременно способ подбирать параметры чанкинга, не платя
-за векторизацию. Команды `build` и `stats` появятся на этапе 3 в этом же файле.
+* `preview` — сухой прогон препроцессинга без обращения к эмбеддеру и хранилищу.
+  Инструмент верификации этапа 1 и способ подбирать параметры чанкинга, не платя
+  за векторизацию.
+* `build` — приведение индекса в соответствие с конспектами. Векторизуется
+  только изменившееся, поэтому повторный запуск бесплатен.
+* `stats` — что лежит в индексе и чем он собран.
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from zerocoder_assistant.reporting import (
     build_corpus_stats,
     render_chunk_sample,
     render_histogram,
+    render_index_report,
+    render_index_status,
     render_stats,
 )
 
@@ -142,6 +146,76 @@ def preview(
         click.echo(f"\nВыгружено чанков: {exported} -> {export_path}")
 
     _report_failures(failures)
+
+
+@index_group.command(name="build")
+@click.option(
+    "--rebuild",
+    is_flag=True,
+    help="Очистить коллекцию и векторизовать всё заново (нужен при смене модели эмбеддингов).",
+)
+@click.option(
+    "--lesson",
+    "lessons",
+    multiple=True,
+    metavar="LESSON_ID",
+    help="Собрать только указанные уроки. Удаление в этом режиме отключается.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Показать план, ничего не записывая и не тратя ни одного запроса к API.",
+)
+def build(rebuild: bool, lessons: tuple[str, ...], dry_run: bool) -> None:
+    """Привести индекс в соответствие с конспектами.
+
+    Векторизуется только изменившееся: чанк со знакомым `content_hash`
+    пропускается. Повторный запуск без правок не обращается к API вообще.
+    """
+    from zerocoder_assistant.errors import AssistantError
+    from zerocoder_assistant.indexing import IndexBuilder
+
+    settings = get_settings()
+    if not settings.notes_dir.is_dir():
+        raise click.ClickException(f"Каталог конспектов не найден: {settings.notes_dir}")
+
+    click.echo(f"Конспекты: {settings.notes_dir}")
+    click.echo(f"Хранилище: {settings.chroma_dir}")
+    click.echo(RULE)
+
+    try:
+        report = IndexBuilder(settings).build(
+            rebuild=rebuild, lessons=lessons or None, dry_run=dry_run
+        )
+    except AssistantError as exc:
+        # Предсказуемый отказ — показываем сообщение, а не трассировку.
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(render_index_report(report))
+
+
+@index_group.command(name="stats")
+def stats() -> None:
+    """Показать, что лежит в индексе и чем он собран."""
+    from zerocoder_assistant.vectorstore import ChromaVectorStore
+    from zerocoder_assistant.vectorstore.manifest import IndexManifest
+
+    settings = get_settings()
+    manifest = IndexManifest.load(settings.chroma_dir)
+    if manifest is None:
+        click.echo(render_index_status(None, 0))
+        return
+
+    # Открываем коллекцию, которой индекс собран, а не ту, что настроена сейчас:
+    # задача команды — показать факт, а не то, что ожидается по конфигурации.
+    with ChromaVectorStore(settings.chroma_dir, manifest.embed_model) as store:
+        vectors = store.count()
+
+    click.echo(render_index_status(manifest, vectors, manifest.staleness(settings.chunking)))
+
+    mismatch = manifest.incompatibility(settings.embed_provider, settings.embed_model)
+    if mismatch:
+        click.echo(f"\nВНИМАНИЕ: {mismatch}", err=True)
 
 
 # ---------------------------------------------------------------------------

@@ -249,9 +249,9 @@ PEr08_final_RAG_agent/
 **CLI:**
 
 ```
-index preview [--lesson PEr08] [--limit N] [--export chunks.jsonl]   # этап 1, готово
+index preview [--lesson PEr08] [--limit N] [--export chunks.jsonl]   # готово
+index build [--rebuild] [--lesson PEr08] [--dry-run] | index stats   # готово
 notes build --raw <file> [--lesson PEr08]                            # этап 1 авторства
-index build [--rebuild] | index stats                                # этап 3
 ask "вопрос" [--lesson PEr06] [--module 5] [--top-k 5] [--no-cache]  # этап 4-5
 eval run [--ragas]                                                   # этап 7-8
 cache stats | cache clear                                            # этап 4

@@ -94,14 +94,18 @@ class Answerer:
     ) -> None:
         self._settings = settings or get_settings()
         self._cache = cache
-        self._retriever = retriever or Retriever(self._settings, cache=cache)
-        self._owns_retriever = retriever is None
+        # Порядок важен: промпт и клиент модели читаются с диска и из настроек,
+        # падают чаще всего (нет файла, нет ключа) и стоят дёшево. Открытое до
+        # них хранилище пришлось бы закрывать из __init__, потому что `with`
+        # получает объект только после его возврата.
         self._llm = llm or build_llm_provider(self._settings)
         self._prompt = prompt or Prompt.load(self._settings.answer_prompt_path)
         self._context = ContextBuilder(
             self._settings.max_context_tokens,
             counter=get_token_counter(self._settings.tokenizer_encoding),
         )
+        self._retriever = retriever or Retriever(self._settings, cache=cache)
+        self._owns_retriever = retriever is None
 
     # -- жизненный цикл ----------------------------------------------------
 
@@ -140,11 +144,18 @@ class Answerer:
             if cached is not None:
                 text, sources = cached
                 logger.debug("Ответ: попадание в кэш L3")
+                # Ссылки пересчитываются, а не берутся из записи: иначе повтор
+                # вопроса показывал бы галлюцинацию как проверенный ответ —
+                # текст тот же, а предупреждение исчезло. Источников ровно
+                # столько, сколько фрагментов ушло в контекст, так что счёт
+                # восстанавливается по ним.
                 return Answer(
                     question=question,
                     text=text,
                     sources=sources,
                     from_cache=True,
+                    used_fragments=len(sources),
+                    unknown_citations=unknown_citations(text, len(sources)),
                     search_query=search_query,
                     timings_ms={"total": _elapsed_ms(started)},
                 )
@@ -229,6 +240,11 @@ class Answerer:
             "temperature": self._settings.temperature,
             "max_answer_tokens": self._settings.max_answer_tokens,
             "max_context_tokens": self._settings.max_context_tokens,
+            # Кодировка решает, сколько фрагментов влезет в бюджет: один и тот
+            # же чанк — 177 токенов по o200k_base и 264 по cl100k_base. Без неё
+            # в ключе смена TOKENIZER_ENCODING отдавала бы ответ, посчитанный
+            # по другому числу фрагментов.
+            "tokenizer_encoding": self._settings.tokenizer_encoding,
             "prompt": self._prompt.name,
             "prompt_version": self._prompt.version,
         }

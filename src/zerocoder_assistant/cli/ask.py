@@ -19,6 +19,13 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from zerocoder_assistant.cli.options import retrieval_options
+from zerocoder_assistant.cli.repl_commands import (
+    COMMAND_CLEAR,
+    COMMAND_HELP,
+    COMMANDS_EXIT,
+    handle_command,
+    is_command,
+)
 from zerocoder_assistant.config.settings import get_settings
 from zerocoder_assistant.errors import AssistantError
 from zerocoder_assistant.reporting import render_answer
@@ -30,20 +37,9 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
 #: Приглашение ввода в диалоговом режиме.
 REPL_PROMPT = "вопрос"
 
-#: Команды диалога. Всё, что начинается с «/», в поиск не уходит.
-COMMAND_CLEAR = "/clear"
-COMMAND_HELP = "/help"
-COMMANDS_EXIT = ("/exit", "/quit")
-
 REPL_GREETING = (
     "Диалог с ассистентом. Память держит последние {pairs} пар реплик.\n"
     "{clear} — забыть диалог, {exit} — выйти, {help} — справка."
-)
-
-REPL_HELP = (
-    f"{COMMAND_CLEAR}  забыть историю диалога\n"
-    f"{COMMANDS_EXIT[0]}   выйти ({COMMANDS_EXIT[1]} — то же самое)\n"
-    f"{COMMAND_HELP}   эта справка"
 )
 
 SEPARATOR = "-" * 72
@@ -126,13 +122,11 @@ def _run_repl(
 
         if not line:
             continue
-        if line in COMMANDS_EXIT:
-            return
-        if line == COMMAND_HELP:
-            click.echo(REPL_HELP)
-            continue
-        if line == COMMAND_CLEAR:
-            click.echo(f"История очищена (забыто пар реплик: {history.clear()}).")
+        if is_command(line):
+            outcome = handle_command(line, history)
+            if outcome.exit_requested:
+                return
+            click.echo(outcome.message)
             continue
 
         _respond(answerer, line, history, options)

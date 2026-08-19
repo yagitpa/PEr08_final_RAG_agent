@@ -38,7 +38,13 @@ BLOCK_SEPARATOR = "\n\n"
 #: Ссылка на фрагмент в ответе модели. Формат тот же, что и в нумерации выше:
 #: один источник истины на два направления — как пишем номера в контекст и как
 #: читаем их обратно из ответа.
-CITATION_PATTERN = re.compile(r"\[(\d{1,3})\]")
+#:
+#: Просмотр назад отсекает индексацию в коде. Корпус — конспекты по
+#: промпт-инжинирингу с примерами на Python, и модель их цитирует: без этой
+#: проверки `items[0]` и `data[42]` объявлялись бы выдуманными ссылками, а
+#: индикатор галлюцинаций мерил бы долю ответов с кодом. Число не ограничено
+#: тремя цифрами намеренно: `[1234]` — тоже выдумка, и её надо поймать.
+CITATION_PATTERN = re.compile(r"(?<![\w\]\)'\"`])\[(\d+)\]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +75,12 @@ class ContextBuilder:
         tokens = 0
         truncated = False
 
+        separator_cost = self._counter.count(FRAGMENT_SEPARATOR)
+
         for number, chunk in enumerate(chunks, 1):
             block = f"[{number}] {chunk.text}"
-            cost = self._counter.count(block) + self._counter.count(FRAGMENT_SEPARATOR)
+            # Разделителей на n блоков ровно n-1: перед первым его нет.
+            cost = self._counter.count(block) + (separator_cost if blocks else 0)
 
             if tokens + cost <= self._max_tokens:
                 blocks.append(block)
@@ -105,11 +114,18 @@ class ContextBuilder:
         )
 
     def _fit(self, block: str) -> str:
-        """Урезать текст до бюджета, ориентируясь по средней длине токена."""
-        while self._counter.count(block) > self._max_tokens and block:
+        """Урезать текст до бюджета, ориентируясь по средней длине токена.
+
+        Строка обязана иметь право стать пустой. Иначе при бюджете, в который
+        не влезает даже один символ, срез упирается в длину 1, условие выхода
+        не наступает никогда и цикл крутится вечно. Через настройки такой
+        бюджет недостижим (`max_context_tokens` не меньше 200), но класс
+        публичный, и зависание — худшая из возможных реакций на плохой аргумент.
+        """
+        while block and self._counter.count(block) > self._max_tokens:
             excess = self._counter.count(block) - self._max_tokens
             cut = max(1, len(block) * excess // max(1, self._counter.count(block)))
-            block = block[: max(1, len(block) - cut)]
+            block = block[: len(block) - cut]
         return block
 
 

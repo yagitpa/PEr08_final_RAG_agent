@@ -128,3 +128,48 @@ class TestSearchQuery:
 
         assert "overlap" in query
         assert "чанкинг" not in query
+
+
+class TestFollowUpChain:
+    """Цепочка уточнений не должна терять предмет разговора."""
+
+    def test_third_reply_keeps_the_topic(self) -> None:
+        """«а почему так?» после «а сколько его ставить?» — предметных слов ноль."""
+        history = SessionHistory(5)
+        history.add("что такое overlap", "перекрытие соседних чанков")
+        history.add("а сколько его ставить", "10-20%")
+
+        query = history.search_query("а почему так")
+
+        assert "overlap" in query
+        assert query.endswith("а почему так")
+
+    def test_query_does_not_grow_with_the_chain(self) -> None:
+        """Держим тему разговора, а не его историю: иначе запрос растёт без предела."""
+        history = SessionHistory(5)
+        history.add("что такое overlap", "перекрытие")
+        for question in ("а сколько его ставить", "а почему так", "а если больше"):
+            query = history.search_query(question)
+            history.add(question, "ответ")
+
+        assert query.count("\n") == 1
+        assert "overlap" in query
+
+    def test_lookback_two_takes_two_topics(self) -> None:
+        """Проверка с lookback=2: при lookback=1 срез неотличим от жёсткого [-1:]."""
+        history = SessionHistory(5, lookback=2)
+        history.add("что такое чанкинг", "разбиение текста")
+        history.add("что такое overlap", "перекрытие")
+
+        query = history.search_query("а сколько его ставить")
+
+        assert "чанкинг" in query
+        assert "overlap" in query
+        assert query.endswith("а сколько его ставить")
+
+    def test_dialogue_started_with_a_follow_up(self) -> None:
+        """Опоры нет — берём последний заданный вопрос, лучше неточная, чем никакой."""
+        history = SessionHistory(5)
+        history.add("а это точно так", "да")
+
+        assert history.search_query("а почему") == "а это точно так\nа почему"

@@ -27,6 +27,7 @@ from zerocoder_assistant.generation import (
 )
 from zerocoder_assistant.generation.context_builder import FRAGMENTS_HEADER, QUESTION_HEADER
 from zerocoder_assistant.memory import SessionHistory
+from zerocoder_assistant.preprocessing.tokenization import get_token_counter
 from zerocoder_assistant.retrieval import Retriever, build_where
 from zerocoder_assistant.retrieval.retriever import RetrievedChunk
 from zerocoder_assistant.vectorstore.chroma_store import ChromaVectorStore
@@ -41,6 +42,13 @@ def make_hit(number: int, text: str, similarity: float = 0.9) -> RetrievedChunk:
         similarity=similarity,
         metadata={"lesson_id": "PEr08", "section_title": f"Секция {number}"},
     )
+
+
+def make_long_chunk(number: int):
+    """Чанк, который в одиночку занимает заметную часть бюджета контекста."""
+    from fakes import make_chunk
+
+    return make_chunk(number, f"фрагмент {number}. " + "длинное слово " * 60)
 
 
 @pytest.fixture
@@ -285,3 +293,120 @@ class TestAnswerCache:
         answerer.answer("как работает кэш")
 
         assert len(llm.calls) == 2
+
+
+class TestCitationsInCode:
+    """Конспекты по промпт-инжинирингу полны примеров на Python.
+
+    Индексация массива — не ссылка на фрагмент. Без этого различия индикатор
+    галлюцинаций мерил бы долю ответов, в которых есть код.
+    """
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "Смотрите: `items[0]` возвращает первый элемент.",
+            "Пишите data[10] и data[42], как в конспекте.",
+            "Обращение вида results[3] к списку.",
+            'Ключ достаётся так: config["hosts"][0].',
+        ],
+    )
+    def test_array_indexing_is_not_a_citation(self, answer: str) -> None:
+        assert unknown_citations(answer, available=2) == []
+
+    def test_real_citation_next_to_code_still_counts(self) -> None:
+        assert cited_numbers("Пример `items[0]` разобран во фрагменте [2].") == [2]
+
+    def test_long_number_is_not_missed(self) -> None:
+        """Ограничение в три цифры пропускало бы [1234] как несуществующий номер."""
+        assert unknown_citations("По фрагменту [1234].", available=5) == [1234]
+
+
+class TestContextBudgetEdges:
+    def test_fit_terminates_on_impossible_budget(self) -> None:
+        """Зависание — худшая реакция на плохой аргумент: класс публичный."""
+        context = ContextBuilder(1).build([make_hit(0, "слово " * 50)])
+
+        assert context.truncated
+        assert context.used == 1
+
+    def test_reported_tokens_match_the_text(self) -> None:
+        """Разделителей на n блоков ровно n-1, иначе --verbose печатает завышенное."""
+        counter = get_token_counter("o200k_base")
+        hits = [make_hit(number, f"фрагмент номер {number}") for number in range(3)]
+
+        context = ContextBuilder(1000, counter=counter).build(hits)
+
+        assert context.tokens == counter.count(context.text)
+
+
+class TestAnswerCacheFingerprint:
+    """Всё, что влияет на текст ответа, обязано входить в ключ.
+
+    Иначе правка настройки отдаёт вчерашний ответ как свежий — ровно тот
+    сценарий, который домашние задания модуля просят продемонстрировать.
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("temperature", 0.9),
+            ("max_answer_tokens", 500),
+            ("max_context_tokens", 900),
+            # Кодировка решает, сколько фрагментов влезет в бюджет: один и тот
+            # же чанк весит по-разному в разных токенайзерах.
+            ("tokenizer_encoding", "cl100k_base"),
+        ],
+    )
+    def test_changed_setting_misses_the_cache(
+        self,
+        settings: Settings,
+        store: ChromaVectorStore,
+        prompt: Prompt,
+        field: str,
+        value: object,
+    ) -> None:
+        cache = SqliteCache(settings.cache_db)
+        llm = FakeLLM("Ответ [1].")
+
+        build_answerer(settings, store, prompt, llm=llm, cache=cache).answer("как работает кэш")
+        changed = settings.model_copy(update={field: value})
+        build_answerer(changed, store, prompt, llm=llm, cache=cache).answer("как работает кэш")
+
+        assert len(llm.calls) == 2, f"{field} не входит в ключ кэша ответов"
+
+    def test_cache_hit_keeps_the_citation_warning(
+        self, settings: Settings, store: ChromaVectorStore, prompt: Prompt
+    ) -> None:
+        """Текст тот же — значит и предупреждение о выдумке должно быть тем же."""
+        cache = SqliteCache(settings.cache_db)
+        answerer = build_answerer(
+            settings, store, prompt, llm=FakeLLM("По фрагменту [9]."), cache=cache
+        )
+
+        first = answerer.answer("как работает кэш")
+        second = answerer.answer("как работает кэш")
+
+        assert second.from_cache
+        assert second.unknown_citations == first.unknown_citations == [9]
+
+
+class TestSourcesMatchContext:
+    def test_sources_cover_only_what_reached_the_model(
+        self, settings: Settings, tmp_path: Path, prompt: Prompt
+    ) -> None:
+        """Ссылка [3] обязана быть третьей строкой списка, а не третьим найденным."""
+        narrow = settings.model_copy(update={"top_k": 3, "max_context_tokens": 200})
+        llm = FakeLLM("Ответ [1].")
+
+        with ChromaVectorStore(tmp_path / "wide", "fake-embed-v1") as store:
+            store.upsert(
+                [make_long_chunk(number) for number in range(3)],
+                [[1.0, 0.0], [0.99, 0.01], [0.98, 0.02]],
+            )
+            answer = build_answerer(narrow, store, prompt, llm=llm).answer(
+                "длинный вопрос", use_cache=False
+            )
+
+        assert answer.dropped_fragments > 0
+        assert len(answer.sources) == answer.used_fragments

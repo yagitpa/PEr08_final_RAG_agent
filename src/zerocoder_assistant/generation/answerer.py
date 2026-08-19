@@ -26,7 +26,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +41,7 @@ from zerocoder_assistant.generation.prompts import Prompt
 from zerocoder_assistant.llm.base import ChatMessage, LLMProvider
 from zerocoder_assistant.llm.factory import build_llm_provider
 from zerocoder_assistant.memory.session_history import SessionHistory
+from zerocoder_assistant.observability.timing import Stopwatch
 from zerocoder_assistant.preprocessing.tokenization import get_token_counter
 from zerocoder_assistant.retrieval.retriever import RetrievalResult, Retriever
 
@@ -131,7 +131,7 @@ class Answerer:
         use_cache: bool = True,
     ) -> Answer:
         """Ответить на вопрос, опираясь только на базу знаний."""
-        started = time.perf_counter()
+        watch = Stopwatch()
         search_query = history.search_query(question) if history else question
 
         # Кэш ответов подключается, только когда история пуста: ключ не знает о
@@ -157,7 +157,7 @@ class Answerer:
                     used_fragments=len(sources),
                     unknown_citations=unknown_citations(text, len(sources)),
                     search_query=search_query,
-                    timings_ms={"total": _elapsed_ms(started)},
+                    timings_ms=watch.finish(),
                 )
 
         retrieval = self._retriever.retrieve(
@@ -171,15 +171,15 @@ class Answerer:
                 grounded=False,
                 search_query=search_query,
                 retrieval=retrieval,
-                timings_ms={**retrieval.timings_ms, "total": _elapsed_ms(started)},
+                timings_ms={**retrieval.timings_ms, **watch.finish()},
             )
 
-        context = self._context.build(retrieval.chunks)
-        messages = self._messages(question, context.text, history)
+        with watch.stage("context"):
+            context = self._context.build(retrieval.chunks)
+            messages = self._messages(question, context.text, history)
 
-        generation_started = time.perf_counter()
-        text = self._llm.chat(messages, max_tokens=self._settings.max_answer_tokens)
-        llm_ms = _elapsed_ms(generation_started)
+        with watch.stage("llm"):
+            text = self._llm.chat(messages, max_tokens=self._settings.max_answer_tokens)
 
         invented = unknown_citations(text, context.used)
         if invented:
@@ -205,7 +205,7 @@ class Answerer:
             unknown_citations=invented,
             search_query=search_query,
             retrieval=retrieval,
-            timings_ms={**retrieval.timings_ms, "llm": llm_ms, "total": _elapsed_ms(started)},
+            timings_ms={**retrieval.timings_ms, **watch.finish()},
         )
 
     # -- шаги ---------------------------------------------------------------
@@ -257,7 +257,3 @@ class Answerer:
         «каким промптом и какой моделью это посчитано» прямо в SQLite.
         """
         return f"{self._llm.model_id} | {self._prompt.name}@{self._prompt.version}"
-
-
-def _elapsed_ms(since: float) -> float:
-    return (time.perf_counter() - since) * 1000

@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +30,7 @@ from zerocoder_assistant.config.settings import Settings, get_settings
 from zerocoder_assistant.embeddings.base import EmbeddingProvider
 from zerocoder_assistant.embeddings.factory import build_embedding_provider
 from zerocoder_assistant.errors import IndexMismatchError
+from zerocoder_assistant.observability.timing import Stopwatch
 from zerocoder_assistant.retrieval.dedup import deduplicate
 from zerocoder_assistant.vectorstore.chroma_store import ChromaVectorStore
 from zerocoder_assistant.vectorstore.manifest import IndexManifest
@@ -159,7 +159,7 @@ class Retriever:
         знаний нет ничего достаточно близкого.
         """
         params = self.params(top_k, where)
-        timings: dict[str, float] = {}
+        watch = Stopwatch()
 
         if use_cache and self._cache is not None:
             cached = self._cache.get_retrieval(retrieval_key(query, params))
@@ -169,19 +169,16 @@ class Retriever:
                     query=query,
                     chunks=[RetrievedChunk.from_dict(item) for item in cached],
                     from_cache=True,
-                    timings_ms={"total": 0.0},
+                    timings_ms=watch.finish(),
                 )
 
-        started = time.perf_counter()
-        vector = self._embed(query, use_cache=use_cache)
-        timings["embed"] = _elapsed_ms(started)
-
-        searched = time.perf_counter()
-        raw = self._store.query(vector, params.top_k * params.overfetch_factor, where=where)
-        timings["search"] = _elapsed_ms(searched)
+        with watch.stage("embed"):
+            vector = self._embed(query, use_cache=use_cache)
+        with watch.stage("search"):
+            raw = self._store.query(vector, params.top_k * params.overfetch_factor, where=where)
 
         result = self._select(query, raw, params)
-        timings["total"] = _elapsed_ms(started)
+        timings = watch.finish()
 
         if use_cache and self._cache is not None:
             self._cache.set_retrieval(
@@ -198,6 +195,49 @@ class Retriever:
             below_threshold=result.below_threshold,
             duplicates=result.duplicates,
             timings_ms=timings,
+        )
+
+    def candidates(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        where: dict[str, Any] | None = None,
+        use_cache: bool = True,
+    ) -> RetrievalResult:
+        """Всё, что нашлось: без порога и без среза, только дедупликация.
+
+        Нужно оценке. Отчёт о качестве обязан отвечать на вопрос «а что было бы
+        при другом пороге», и получить этот ответ, прогоняя корпус заново на
+        каждое значение порога, слишком дорого: сходства от порога не зависят,
+        зависит только отсечение. Кэш здесь только уровня L1 — результат зависит
+        от порога и в L2 ему не место.
+        """
+        params = self.params(top_k, where)
+        watch = Stopwatch()
+
+        with watch.stage("embed"):
+            vector = self._embed(query, use_cache=use_cache)
+        with watch.stage("search"):
+            raw = self._store.query(vector, params.top_k * params.overfetch_factor, where=where)
+
+        found = [
+            RetrievedChunk(
+                chunk_id=hit.chunk_id,
+                text=hit.text,
+                similarity=hit.similarity,
+                metadata=hit.metadata,
+            )
+            for hit in raw
+        ]
+        unique, duplicates = deduplicate(found, params.dedup_threshold)
+
+        return RetrievalResult(
+            query=query,
+            chunks=unique,
+            candidates=len(found),
+            duplicates=duplicates,
+            timings_ms=watch.finish(),
         )
 
     # -- шаги ---------------------------------------------------------------
@@ -276,7 +316,3 @@ class Retriever:
             below_threshold=below,
             duplicates=duplicates,
         )
-
-
-def _elapsed_ms(since: float) -> float:
-    return (time.perf_counter() - since) * 1000

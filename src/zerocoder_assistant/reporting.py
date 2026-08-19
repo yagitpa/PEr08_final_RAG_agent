@@ -30,8 +30,11 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
 
     from zerocoder_assistant.cache.sqlite_cache import CacheStats
     from zerocoder_assistant.config.settings import ChunkingConfig
+    from zerocoder_assistant.evaluation.metrics import EvaluationReport
+    from zerocoder_assistant.evaluation.runner import ThresholdPoint
     from zerocoder_assistant.generation.answerer import Answer
     from zerocoder_assistant.indexing.builder import IndexReport
+    from zerocoder_assistant.observability.counters import CacheUsage
     from zerocoder_assistant.preprocessing.models import Chunk, ProcessedNote
     from zerocoder_assistant.retrieval.retriever import RetrievalResult
     from zerocoder_assistant.vectorstore.manifest import IndexManifest
@@ -415,6 +418,176 @@ def _answer_diagnostics(answer: Answer) -> list[str]:
     if answer.timings_ms:
         lines.append(_field("Время", _render_timings(answer.timings_ms)))
     return lines
+
+
+KIND_LABELS: Final[dict[str, str]] = {
+    "in_domain_absent": "смежная тема, но её нет в конспектах",
+    "out_of_domain": "вопрос не про курс",
+}
+
+#: Сколько неправильных исходов перечислять поимённо. Полный список уезжает в
+#: JSONL по --export: в терминале он не читается, а разбирать надо по одному.
+TOP_FAILURES: Final[int] = 12
+
+
+def render_evaluation(report: EvaluationReport, *, failures: bool = True) -> str:
+    """Сводка по golden set.
+
+    Отвечаемые и неотвечаемые вопросы показаны порознь намеренно. Одно общее
+    число скрывает противоположные болезни: систему, которая находит всё подряд
+    и никогда не отказывает, и систему, которая молчит на половину вопросов.
+    Лечатся они сдвигом порога в разные стороны.
+    """
+    scope = (
+        f"{report.total} (отвечаемых {report.answerable}, без ответа в базе {report.unanswerable})"
+    )
+    lines = [_field("Вопросов", scope), "", "Поиск по отвечаемым вопросам"]
+    for level in sorted(report.recall):
+        lines.append(_field(f"{INDENT}recall@{level}", _percent(report.recall[level])))
+    lines.append(_field(f"{INDENT}MRR", f"{report.mrr:.3f}"))
+    false_refusals = f"{report.false_refusals} из {report.answerable}"
+    if report.answerable:
+        false_refusals += f" ({_percent(report.false_refusals / report.answerable)})"
+    lines.append(_field(f"{INDENT}ложных отказов", false_refusals))
+
+    if report.refusals:
+        lines.append("")
+        lines.append("Отказы там, где ответа нет")
+        for stats in report.refusals:
+            label = KIND_LABELS.get(stats.kind, stats.kind)
+            lines.append(
+                _field(
+                    f"{INDENT}{label}",
+                    f"{stats.refused}/{stats.total} ({_percent(stats.accuracy)})"
+                    + (f", придумано {stats.invented}" if stats.invented else ""),
+                )
+            )
+        lines.append(_field(f"{INDENT}всего", _percent(report.refusal_accuracy)))
+
+    lines.append("")
+    lines.append("Разделимость по сходству лучшего фрагмента")
+    lowest = _similarity(report.min_similarity_answerable)
+    highest = _similarity(report.max_similarity_unanswerable)
+    lines.append(_field(f"{INDENT}минимум там, где ответ есть", lowest))
+    lines.append(_field(f"{INDENT}максимум там, где его нет", highest))
+    lines.append(_field(f"{INDENT}зазор", _separation(report.separation)))
+
+    lines.append("")
+    lines.append("Скорость и кэш")
+    latency = f"{report.latency_p50:.0f} / {report.latency_p95:.0f} мс"
+    lines.append(_field(f"{INDENT}латентность p50 / p95", latency))
+    if report.cache_lookups:
+        hits = f"{report.cache_hits} из {report.cache_lookups}"
+        lines.append(
+            _field(f"{INDENT}попаданий в кэш", f"{hits} ({_percent(report.cache_hit_rate)})")
+        )
+
+    if report.answered:
+        lines.append("")
+        lines.append("Ответы модели")
+        lines.append(_field(f"{INDENT}получено", report.answered))
+        if report.unanswerable_answered:
+            refused = f"{report.answer_refusals} из {report.unanswerable_answered}"
+            lines.append(
+                _field(
+                    f"{INDENT}отказов модели там, где нет ответа",
+                    f"{refused} ({_percent(report.answer_refusal_accuracy)})",
+                )
+            )
+            lines.append(_field(f"{INDENT}придуманных ответов", report.hallucinations))
+        lines.append(
+            _field(f"{INDENT}со ссылками на несуществующие", report.with_unknown_citations)
+        )
+
+    if failures and report.failures:
+        lines.append("")
+        lines.append(f"Неправильные исходы ({len(report.failures)}):")
+        for outcome in report.failures[:TOP_FAILURES]:
+            lines.append(f"{INDENT}{_failure_line(outcome)}")
+        if len(report.failures) > TOP_FAILURES:
+            lines.append(f"{INDENT}... и ещё {len(report.failures) - TOP_FAILURES}")
+
+    return "\n".join(lines)
+
+
+def _failure_line(outcome) -> str:
+    question = outcome.question
+    text = _truncate(question.question, 60)
+    if not question.answerable:
+        return f"{question.id} придуман ответ на «{text}» ({_similarity(outcome.top_similarity)})"
+    if outcome.refused:
+        return f"{question.id} отказ на «{text}», ждали {'/'.join(question.lessons)}"
+    return (
+        f"{question.id} «{text}»: ждали {'/'.join(question.lessons)}, "
+        f"нашли {'/'.join(outcome.lessons) or 'ничего'}"
+    )
+
+
+def render_threshold_sweep(points: Sequence[ThresholdPoint], current: float) -> str:
+    """Таблица «порог -> что получится», с отметкой текущего значения.
+
+    Показываются обе ошибки сразу: подняв порог, всегда можно довести отказы до
+    идеала — ценой ответов на вопросы, ответ на которые есть.
+    """
+    if not points:
+        return "(нечего показывать)"
+
+    best = max(points, key=lambda point: (point.score, -abs(point.threshold - current)))
+    lines = [
+        "порог   recall@k  ложных   верных    доля",
+        "                  отказов  отказов   правильных",
+    ]
+    for point in points:
+        report = point.report
+        mark = " <- сейчас" if abs(point.threshold - current) < 1e-9 else ""
+        if point is best:
+            mark += " <- лучший"
+        lines.append(
+            f"{point.threshold:5.2f}   {_percent(point.recall):>7}  "
+            f"{report.false_refusals:>7}  "
+            f"{sum(s.refused for s in report.refusals):>3}/{report.unanswerable:<3}  "
+            f"{_percent(point.score):>7}{mark}"
+        )
+
+    lines.append("")
+    lines.append(
+        _field("Лучший по доле правильных", f"{best.threshold:.2f} ({_percent(best.score)})")
+    )
+    lines.append("Значение из настроек — компромисс: ложный отказ окончателен, а слабый")
+    lines.append("фрагмент модель отсеет сама, поэтому порог смещают вниз от максимума.")
+    return "\n".join(lines)
+
+
+def render_cache_usage(usage: CacheUsage) -> str:
+    """Попадания за прогон — в отличие от `cache stats`, это про пользу, а не про размер."""
+    lines = ["Попадания в кэш за прогон"]
+    for level in usage.levels:
+        lines.append(
+            _field(
+                f"{INDENT}{level.level}",
+                f"{level.hits}/{level.lookups} ({_percent(level.hit_rate)})"
+                if level.lookups
+                else "обращений не было",
+            )
+        )
+    lines.append(_field("Всего", f"{usage.hits}/{usage.lookups} ({_percent(usage.hit_rate)})"))
+    return "\n".join(lines)
+
+
+def _percent(share: float) -> str:
+    return f"{share * 100:.0f}%"
+
+
+def _similarity(value: float | None) -> str:
+    return f"{value:.3f}" if value is not None else "-"
+
+
+def _separation(value: float | None) -> str:
+    if value is None:
+        return "-"
+    if value <= 0:
+        return f"{value:+.3f} (классы перекрываются: порогом их не разделить)"
+    return f"{value:+.3f}"
 
 
 def render_cache_stats(stats: CacheStats, path: Path | None = None) -> str:

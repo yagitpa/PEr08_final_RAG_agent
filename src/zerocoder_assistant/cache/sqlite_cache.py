@@ -30,6 +30,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from zerocoder_assistant.observability.counters import (
+    LEVEL_ANSWERS,
+    LEVEL_EMBEDDINGS,
+    LEVEL_RETRIEVAL,
+    CacheUsage,
+    UsageCounters,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Векторы хранятся как упакованные float32, а не как JSON: 1536 чисел занимают
@@ -86,6 +94,9 @@ class SqliteCache:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # Счётчики прогона: в SQLite следа обращений не остаётся, а «сколько
+        # записей накоплено» — это про размер, а не про пользу.
+        self.usage = UsageCounters()
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
@@ -98,6 +109,7 @@ class SqliteCache:
 
     def get_embedding(self, key: str) -> list[float] | None:
         row = self._fetch("SELECT vector FROM query_embeddings WHERE key = ?", key)
+        self.usage.record(LEVEL_EMBEDDINGS, hit=row is not None)
         if row is None:
             return None
         vector = array(_VECTOR_TYPE)
@@ -117,6 +129,7 @@ class SqliteCache:
 
     def get_retrieval(self, key: str) -> list[dict[str, Any]] | None:
         row = self._fetch("SELECT hits FROM retrievals WHERE key = ?", key)
+        self.usage.record(LEVEL_RETRIEVAL, hit=row is not None)
         return json.loads(row[0]) if row else None
 
     def set_retrieval(
@@ -132,6 +145,7 @@ class SqliteCache:
 
     def get_answer(self, key: str) -> tuple[str, list[str]] | None:
         row = self._fetch("SELECT answer, sources FROM answers WHERE key = ?", key)
+        self.usage.record(LEVEL_ANSWERS, hit=row is not None)
         return (row[0], json.loads(row[1])) if row else None
 
     def set_answer(
@@ -158,6 +172,10 @@ class SqliteCache:
             size_bytes=self.path.stat().st_size if self.path.exists() else 0,
         )
 
+    def snapshot_usage(self) -> CacheUsage:
+        """Попадания и промахи с начала прогона."""
+        return self.usage.snapshot()
+
     def clear(self, level: str | None = None) -> int:
         """Очищает кэш целиком или один уровень. Возвращает число удалённых записей."""
         tables = _TABLES if level is None else (_resolve_table(level),)
@@ -182,11 +200,13 @@ class SqliteCache:
             connection.commit()
 
 
-#: Понятные имена уровней для команды `cache clear --level`.
+#: Понятные имена уровней для команды `cache clear --level`. Имена те же, что
+#: в счётчиках попаданий: уровень должен называться одинаково и в очистке, и в
+#: отчёте, иначе их не сопоставить глазами.
 LEVEL_TABLES = {
-    "embeddings": "query_embeddings",
-    "retrieval": "retrievals",
-    "answers": "answers",
+    LEVEL_EMBEDDINGS: "query_embeddings",
+    LEVEL_RETRIEVAL: "retrievals",
+    LEVEL_ANSWERS: "answers",
 }
 
 

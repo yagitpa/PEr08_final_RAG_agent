@@ -19,8 +19,27 @@ from typing import Final
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from zerocoder_assistant.errors import MissingCredentialsError
+
 #: Корень проекта: <root>/src/zerocoder_assistant/config/settings.py -> parents[3].
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
+
+#: Какие поля настроек описывают каждого провайдера: (ключ, адрес).
+#: Добавить Сбер или Яндекс — значит дописать сюда строку и положить рядом
+#: реализацию клиента; ядро при этом не меняется.
+PROVIDER_FIELDS: Final[dict[str, tuple[str, str]]] = {
+    "openai": ("openai_api_key", "openai_base_url"),
+    "proxyapi": ("proxyapi_api_key", "proxyapi_base_url"),
+}
+
+
+class ProviderCredentials(BaseModel):
+    """Разрешённые доступы к одному провайдеру."""
+
+    model_config = {"frozen": True}
+
+    api_key: str
+    base_url: str
 
 
 class ChunkingConfig(BaseModel):
@@ -83,6 +102,10 @@ class Settings(BaseSettings):
     chroma_dir: Path = Path("./storage/chroma")
     cache_db: Path = Path("./storage/cache.db")
 
+    embed_batch_size: int = Field(default=64, ge=1, le=2048)
+    request_timeout: float = Field(default=60.0, gt=0)
+    max_retries: int = Field(default=3, ge=0, le=10)
+
     # --- Чанкинг (этап 1) ---------------------------------------------------
     chunk_target_tokens: int = 400
     chunk_max_tokens: int = 500
@@ -121,6 +144,24 @@ class Settings(BaseSettings):
             overlap_pct=self.chunk_overlap_pct,
             encoding=self.tokenizer_encoding,
         )
+
+    def credentials(self, provider: str) -> ProviderCredentials:
+        """Ключ и адрес для названного провайдера.
+
+        ProxyAPI отличается от OpenAI только адресом, поэтому оба обслуживаются
+        одним адаптером, а различие живёт здесь, в конфигурации.
+        """
+        fields = PROVIDER_FIELDS.get(provider.lower())
+        if fields is None:
+            supported = ", ".join(sorted(PROVIDER_FIELDS))
+            raise ValueError(f"Неизвестный провайдер {provider!r}. Поддерживаются: {supported}")
+
+        key_field, url_field = fields
+        api_key: str | None = getattr(self, key_field)
+        if not api_key:
+            raise MissingCredentialsError(provider=provider, env_var=key_field.upper())
+
+        return ProviderCredentials(api_key=api_key, base_url=getattr(self, url_field))
 
 
 @lru_cache(maxsize=1)

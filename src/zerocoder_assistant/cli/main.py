@@ -2,7 +2,7 @@
 Корневая группа CLI: `zassist`.
 
 Единственная точка входа проекта. Сама она ничего не делает — только собирает
-подгруппы (`index`, `search`, `cache`, далее `notes`, `ask`, `eval`) и настраивает логи до
+подгруппы (`index`, `search`, `ask`, `cache`, далее `notes` и `eval`) и настраивает логи до
 того, как отработает любая команда.
 """
 
@@ -15,6 +15,7 @@ from typing import Final
 
 import click
 
+from zerocoder_assistant.cli.ask import ask
 from zerocoder_assistant.cli.cache import cache_group
 from zerocoder_assistant.cli.index import index_group
 from zerocoder_assistant.cli.search import search
@@ -83,4 +84,5 @@ def main(log_level: str | None) -> None:
 
 main.add_command(index_group)
 main.add_command(search)
+main.add_command(ask)
 main.add_command(cache_group)

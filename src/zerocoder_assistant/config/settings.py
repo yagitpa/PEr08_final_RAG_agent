@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     raw_dir: Path = Path("./data/raw")
     chroma_dir: Path = Path("./storage/chroma")
     cache_db: Path = Path("./storage/cache.db")
+    prompts_dir: Path = Path("./prompts")
 
     embed_batch_size: int = Field(default=64, ge=1, le=2048)
     request_timeout: float = Field(default=60.0, gt=0)
@@ -124,7 +125,17 @@ class Settings(BaseSettings):
     relevance_threshold: float = Field(default=0.33, ge=0.0, le=1.0)
     dedup_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     max_context_tokens: int = Field(default=3000, ge=200)
+    max_answer_tokens: int = Field(default=1000, ge=100, le=16000)
     history_pairs: int = Field(default=5, ge=0, le=50)
+    #: Сколько предыдущих вопросов подмешивать в поиск, когда текущий выглядит
+    #: уточняющим. 0 — не подмешивать: уточнения перестанут находиться в базе,
+    #: зато поисковый запрос всегда будет ровно тем, что спросил студент.
+    follow_up_lookback: int = Field(default=1, ge=0, le=5)
+    #: Имя файла системного промпта в `prompts_dir`. Вынесено в настройки, чтобы
+    #: сравнить две редакции промпта можно было запуском, а не правкой кода.
+    #: Содержимое файла хешируется и входит в ключ кэша L3, поэтому подмена
+    #: промпта не отдаёт ответы, посчитанные по прежней редакции.
+    answer_prompt_file: str = "rag_answer_v1.md"
 
     log_level: str = "INFO"
 
@@ -134,11 +145,16 @@ class Settings(BaseSettings):
 
         Иначе поведение команд зависит от того, из какой папки их запустили.
         """
-        for field in ("notes_dir", "raw_dir", "chroma_dir", "cache_db"):
+        for field in ("notes_dir", "raw_dir", "chroma_dir", "cache_db", "prompts_dir"):
             value: Path = getattr(self, field)
             if not value.is_absolute():
                 object.__setattr__(self, field, (PROJECT_ROOT / value).resolve())
         return self
+
+    @property
+    def answer_prompt_path(self) -> Path:
+        """Полный путь к файлу системного промпта генерации."""
+        return self.prompts_dir / self.answer_prompt_file
 
     @property
     def chunking(self) -> ChunkingConfig:

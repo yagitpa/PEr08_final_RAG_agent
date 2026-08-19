@@ -7,15 +7,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
-import pytest
+from fakes import FakeEmbedder
 
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
 from zerocoder_assistant.config.settings import Settings
-from zerocoder_assistant.preprocessing.models import Chunk, NoteMetadata, content_hash
 from zerocoder_assistant.retrieval import Retriever, build_where, deduplicate
 from zerocoder_assistant.retrieval.dedup import jaccard, shingles
 from zerocoder_assistant.vectorstore.chroma_store import ChromaVectorStore
@@ -110,79 +107,6 @@ class TestDeduplicate:
 
     def test_empty_input(self) -> None:
         assert deduplicate([], 0.8) == ([], 0)
-
-
-class FakeEmbedder:
-    """Возвращает заранее заданный вектор для каждого запроса."""
-
-    def __init__(self, vectors: dict[str, list[float]] | None = None) -> None:
-        self.vectors = vectors or {}
-        self.calls = 0
-
-    @property
-    def model_id(self) -> str:
-        return "fake-embed-v1"
-
-    @property
-    def dimension(self) -> int:
-        return 2
-
-    def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        self.calls += len(texts)
-        return [self.vectors.get(text, [1.0, 0.0]) for text in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self.embed([text])[0]
-
-
-def make_chunk(index: int, text: str, lesson_id: str = "PEr08") -> Chunk:
-    note = NoteMetadata(
-        source_file=f"{lesson_id}.md",
-        lesson_title=f"{lesson_id}. Урок",
-        lesson_id=lesson_id,
-        module_num=5,
-    )
-    return Chunk(
-        chunk_id=f"{lesson_id}:s000:c{index:02d}",
-        text=text,
-        note=note,
-        heading_path=(f"{lesson_id}. Урок", "Теория"),
-        section_title="Теория",
-        chunk_index=index,
-        chunks_in_section=1,
-        content_type="theory",
-        token_count=len(text),
-        hash=content_hash(text),
-    )
-
-
-@pytest.fixture
-def settings(tmp_path: Path) -> Settings:
-    return Settings(
-        openai_api_key="test-key",
-        chroma_dir=tmp_path / "chroma",
-        cache_db=tmp_path / "cache.db",
-        top_k=2,
-        overfetch_factor=3,
-        relevance_threshold=0.5,
-        dedup_threshold=0.8,
-    )
-
-
-@pytest.fixture
-def store(settings: Settings) -> Iterator[ChromaVectorStore]:
-    with ChromaVectorStore(settings.chroma_dir, "fake-embed-v1") as store:
-        # Векторы подобраны так, чтобы сходство было предсказуемым:
-        # запрос [1,0] даёт similarity 1.0 для [1,0] и 0.0 для [0,1].
-        store.upsert(
-            [
-                make_chunk(0, "первый фрагмент про кэширование запросов в системе"),
-                make_chunk(1, "второй фрагмент про кэширование ответов и векторов"),
-                make_chunk(2, "совсем посторонний фрагмент про другое", lesson_id="PEr01"),
-            ],
-            [[1.0, 0.0], [0.95, 0.05], [0.0, 1.0]],
-        )
-        yield store
 
 
 class TestRetriever:

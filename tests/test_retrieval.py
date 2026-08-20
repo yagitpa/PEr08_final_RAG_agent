@@ -279,3 +279,72 @@ class TestRetrieverCache:
         again = retriever.retrieve("вопрос", use_cache=False)
 
         assert not again.from_cache
+
+
+@dataclass
+class FakeRawHit:
+    """То, что отдаёт хранилище, до превращения в RetrievedChunk."""
+
+    chunk_id: str
+    text: str
+    similarity: float
+    metadata: dict
+
+
+class TestThresholdBoundary:
+    """Сходство ровно на пороге — фрагмент берётся.
+
+    Граница не украшение: рабочее значение подобрано перебором по golden set,
+    и сдвиг на один шаг сравнения меняет и recall, и число отказов. Проверялось
+    это только значениями заведомо выше и заведомо ниже, поэтому `>` вместо
+    `>=` тест бы не заметил.
+    """
+
+    def params(self, settings: Settings, threshold: float) -> object:
+        from zerocoder_assistant.cache.keys import RetrievalParams
+
+        return RetrievalParams(
+            embed_model="fake-embed-v1",
+            top_k=settings.top_k,
+            overfetch_factor=settings.overfetch_factor,
+            relevance_threshold=threshold,
+            dedup_threshold=settings.dedup_threshold,
+            filters=None,
+            index_version="тест",
+        )
+
+    def select(self, settings: Settings, store: ChromaVectorStore, similarities: list[float]):
+        retriever = Retriever(settings, embedder=FakeEmbedder(), store=store)
+        try:
+            raw = [
+                FakeRawHit(f"c{index}", f"фрагмент номер {index}", value, {"lesson_id": "PEr08"})
+                for index, value in enumerate(similarities)
+            ]
+            return retriever._select("вопрос", raw, self.params(settings, 0.5))
+        finally:
+            retriever.close()
+
+    def test_similarity_equal_to_threshold_is_kept(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        result = self.select(settings, store, [0.5])
+
+        assert [chunk.chunk_id for chunk in result.chunks] == ["c0"]
+        assert result.below_threshold == 0
+
+    def test_similarity_just_below_is_cut(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        result = self.select(settings, store, [0.499])
+
+        assert result.chunks == []
+        assert result.below_threshold == 1
+
+    def test_best_candidate_is_reported_even_when_everything_is_cut(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        """Иначе о близости запроса к базе судить было бы не по чему."""
+        result = self.select(settings, store, [0.4, 0.3])
+
+        assert result.chunks == []
+        assert result.top_candidate_similarity == 0.4

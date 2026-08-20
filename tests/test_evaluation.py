@@ -423,11 +423,23 @@ class TestObservability:
         assert "search" in watch.finish()
 
     def test_percentile_picks_a_real_measurement(self) -> None:
+        """Значение проверяется точно, а не через `in values`.
+
+        Проверка на вхождение проходила и у реализации, которая всегда
+        возвращает максимум: любой процентиль — тоже одно из измерений.
+        Медиана и p95 обязаны различаться.
+        """
         values = [10.0, 20.0, 30.0, 40.0]
 
-        assert percentile(values, 0.5) in values
+        assert percentile(values, 0.5) == 30.0
         assert percentile(values, 0.95) == 40.0
+        assert percentile(values, 0.0) == 10.0
         assert percentile([], 0.5) == 0.0
+
+    def test_percentile_ignores_input_order(self) -> None:
+        assert percentile([40.0, 10.0, 30.0, 20.0], 0.5) == percentile(
+            [10.0, 20.0, 30.0, 40.0], 0.5
+        )
 
     def test_cache_counters_split_by_level(self) -> None:
         counters = UsageCounters()

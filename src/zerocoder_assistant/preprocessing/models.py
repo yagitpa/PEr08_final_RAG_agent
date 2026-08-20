@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,6 +87,27 @@ class Chunk:
     content_type: str
     token_count: int
     hash: str
+
+    def fingerprint(self) -> str:
+        """Отпечаток всего, что уезжает в хранилище: текста И паспорта.
+
+        Идемпотентность сравнивает чанки по отпечатку, а в базу пишется не один
+        текст. Пока отпечаток считался только по тексту, любая правка
+        метаданных без правки текста навсегда оставалась в файле и не доезжала
+        до индекса: сборка честно докладывала `unchanged`, `embedded=0` — и это
+        выглядело как успешный повтор.
+
+        Проявлялось это двумя способами. Дописанный frontmatter (`lesson_id`,
+        `module_num`) не менял ничего, и фильтры `--lesson` / `--module`
+        продолжали искать по старым значениям. А выросшая секция оставляла
+        первому чанку прежний `chunks_in_section`, и в списке источников
+        появлялось «часть 1/2» рядом с «часть 2/5».
+
+        Из отпечатка исключён сам `content_hash` — иначе он зависел бы от себя.
+        """
+        payload = {key: value for key, value in self.as_metadata().items() if key != "content_hash"}
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return content_hash(f"{serialized}\n{self.text}")
 
     def as_metadata(self) -> dict[str, Any]:
         """Плоские метаданные для векторного хранилища.

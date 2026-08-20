@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from zerocoder_assistant.config.settings import Settings
-from zerocoder_assistant.errors import IndexMismatchError
+from zerocoder_assistant.errors import IndexBuildError, IndexMismatchError
 from zerocoder_assistant.indexing import IndexBuilder
 from zerocoder_assistant.vectorstore.chroma_store import ChromaVectorStore
 from zerocoder_assistant.vectorstore.manifest import IndexManifest
@@ -274,3 +274,105 @@ class TestResilience:
         assert report.notes == 0
         assert report.chunks == 0
         assert report.embedded == 0
+
+
+class TestDestructiveGuards:
+    """Операции, которые уносят содержимое базы, а выглядят успешными.
+
+    Обе проверки написаны после код-ревью: в обоих случаях чанки исчезали из
+    индекса, отчёт показывал `removed=0`, а файлы на диске оставались целыми.
+    """
+
+    def test_rebuild_with_lesson_filter_is_refused(
+        self, settings: Settings, notes_dir: Path
+    ) -> None:
+        """Поодиночке оба флага безопасны, вместе — стирают чужие уроки.
+
+        `--rebuild` чистит коллекцию целиком, `--lesson` наполняет её только
+        отобранным. Отчёт при этом честно сообщает `removed=0`: плановых
+        удалений не было, содержимое исчезло раньше.
+        """
+        write_note(notes_dir, "PEr01")
+        write_note(notes_dir, "PEr02")
+        build(settings, FakeEmbedder())
+
+        with pytest.raises(IndexBuildError, match="несовместима"):
+            build(settings, FakeEmbedder(), rebuild=True, lessons=["PEr01"])
+
+    def test_other_lessons_survive_the_refused_rebuild(
+        self, settings: Settings, notes_dir: Path
+    ) -> None:
+        """Отказ должен случиться ДО очистки, а не после."""
+        write_note(notes_dir, "PEr01")
+        write_note(notes_dir, "PEr02")
+        before = build(settings, FakeEmbedder()).chunks
+
+        with pytest.raises(IndexBuildError):
+            build(settings, FakeEmbedder(), rebuild=True, lessons=["PEr01"])
+
+        assert build(settings, FakeEmbedder(), dry_run=True).unchanged == before
+
+    def test_unreadable_file_does_not_delete_its_chunks(
+        self, settings: Settings, notes_dir: Path
+    ) -> None:
+        """Сбой чтения и «конспект удалён» — разные вещи.
+
+        Файл цел на диске, но не читается (битая кодировка, несинхронизированный
+        плейсхолдер OneDrive, блокировка антивирусом). Прежде все его чанки
+        уходили из базы, и ассистент начинал отвечать «в конспектах этого нет».
+        """
+        write_note(notes_dir, "PEr01")
+        broken = write_note(notes_dir, "PEr02")
+        first = build(settings, FakeEmbedder())
+        assert first.notes == 2
+
+        broken.write_bytes(b"\xff\xfe\x80\x81\x82")
+        second = build(settings, FakeEmbedder())
+
+        assert second.failed_files
+        assert second.removed == 0
+
+    def test_deleted_file_still_removes_its_chunks(
+        self, settings: Settings, notes_dir: Path
+    ) -> None:
+        """Осторожность не должна отменить настоящее удаление."""
+        write_note(notes_dir, "PEr01")
+        removable = write_note(notes_dir, "PEr02")
+        build(settings, FakeEmbedder())
+
+        removable.unlink()
+        report = build(settings, FakeEmbedder())
+
+        assert report.removed > 0
+
+
+class TestMetadataReachesTheIndex:
+    def test_frontmatter_change_is_reindexed(self, settings: Settings, notes_dir: Path) -> None:
+        """Правка паспорта без правки текста обязана доехать до индекса.
+
+        Пока отпечаток считался только по тексту, такая правка давала
+        `unchanged`, `embedded=0` — и фильтры `--lesson` / `--module` продолжали
+        искать по старым значениям, ничем себя не выдавая.
+        """
+        path = write_note(notes_dir, "PEr01")
+        build(settings, FakeEmbedder())
+
+        original = path.read_text(encoding="utf-8")
+        path.write_text(
+            "---\nlesson_id: PEr99\nmodule_num: 9\n---\n\n" + original, encoding="utf-8"
+        )
+        report = build(settings, FakeEmbedder())
+
+        assert report.updated > 0
+        assert report.embedded > 0
+
+    def test_identical_note_is_still_free(self, settings: Settings, notes_dir: Path) -> None:
+        """Отпечаток стал шире — но повтор без правок обязан остаться бесплатным."""
+        write_note(notes_dir, "PEr01")
+        build(settings, FakeEmbedder())
+
+        embedder = FakeEmbedder()
+        report = build(settings, embedder)
+
+        assert report.embedded == 0
+        assert embedder.embedded == []

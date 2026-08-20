@@ -97,20 +97,35 @@ class QuestionOutcome:
         return len(self.lessons)
 
     @property
+    def false_refusal(self) -> bool:
+        """Отказ там, где ответ в конспектах есть.
+
+        Считается по обоим рубежам. Учитывать только порог было ошибкой: при
+        исправном поиске модель может отказаться сама, и такой исход для
+        студента ничем не отличается от пустой выдачи — вопрос остался без
+        ответа. По одному лишь порогу ассистент, отказывающий на каждом втором
+        отвечаемом вопросе, показывал бы «ложных отказов 0».
+        """
+        return self.question.answerable and (self.refused or self.answer_refused)
+
+    @property
     def correct(self) -> bool:
         """Правильный исход с точки зрения набора.
 
-        Для отвечаемого вопроса — нужный урок попал в выдачу целиком, то есть
-        на верхний уровень recall в отчёте (`recall_levels` его туда и ставит).
-        Для неотвечаемого —
-        отказ, причём на любом из двух рубежей: порог мог не пропустить
-        фрагменты вовсе либо их пропустил, а модель сама сказала, что ответа в
-        конспектах нет. Второй путь засчитывается наравне с первым, потому что
-        для студента исход один и тот же.
+        Для отвечаемого вопроса — нужный урок попал в выдачу целиком (то есть
+        на верхний уровень recall, куда его ставит `recall_levels`) И модель на
+        нём не отказалась. Одного попадания мало: найти нужное и всё равно
+        сказать «в конспектах этого нет» — неправильный исход, хотя поиск
+        отработал.
+
+        Для неотвечаемого — отказ на любом из двух рубежей: порог мог не
+        пропустить фрагменты вовсе либо их пропустил, а модель сама сказала,
+        что ответа в конспектах нет. Второй путь засчитывается наравне с
+        первым, потому что для студента исход один и тот же.
         """
         if not self.question.answerable:
             return self.refused or self.answer_refused
-        return self.hit_at(len(self.lessons))
+        return self.hit_at(len(self.lessons)) and not self.answer_refused
 
     def hit_at(self, k: int) -> bool:
         """Попал ли ожидаемый урок в первые k отобранных фрагментов."""
@@ -275,7 +290,7 @@ def build_report(
         unanswerable=len(unanswerable),
         recall={level: recall_at(outcomes, level) for level in recall_levels(outcomes)},
         mrr=mean_reciprocal_rank(outcomes),
-        false_refusals=sum(outcome.refused for outcome in answerable),
+        false_refusals=sum(outcome.false_refusal for outcome in answerable),
         refusals=_refusal_stats(unanswerable),
         latency_p50=percentile(latencies, 0.5),
         latency_p95=percentile(latencies, 0.95),

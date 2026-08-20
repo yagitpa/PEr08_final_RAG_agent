@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from zerocoder_assistant.config.settings import Settings, get_settings
 from zerocoder_assistant.embeddings.base import EmbeddingProvider
 from zerocoder_assistant.embeddings.factory import build_embedding_provider
-from zerocoder_assistant.errors import IndexMismatchError
+from zerocoder_assistant.errors import IndexBuildError, IndexMismatchError
 from zerocoder_assistant.preprocessing import (
     Chunk,
     NotePreprocessor,
@@ -105,8 +105,23 @@ class IndexBuilder:
         `lessons` ограничивает сборку конкретными уроками. В этом режиме удаление
         отключается: иначе частичная сборка снесла бы из индекса всё остальное.
 
+        Вместе с `rebuild` фильтр запрещён. Поодиночке каждый безопасен, а
+        вместе они делают ровно то, от чего защищает предыдущий абзац: очистка
+        сносит коллекцию целиком, и наполняется она потом только отобранными
+        уроками. Отчёт при этом выглядит успешным и показывает `removed=0` —
+        плановых удалений действительно не было, содержимое исчезло раньше.
+
         `dry_run` показывает план, ничего не меняя и не тратя ни одного запроса.
         """
+        if rebuild and lessons:
+            raise IndexBuildError(
+                "Полная пересборка (--rebuild) несовместима с фильтром по урокам "
+                "(--lesson): очистка снесёт коллекцию целиком, а наполнится она "
+                "только отобранными уроками.\n"
+                "Пересоберите весь индекс без --lesson либо обновите отдельные "
+                "уроки без --rebuild."
+            )
+
         started = time.monotonic()
         embedder = self._embedder or build_embedding_provider(self._settings)
 
@@ -126,7 +141,14 @@ class IndexBuilder:
                 store.reset()
 
             stored = {} if rebuild else store.stored_hashes()
-            plan = self._plan(chunks, stored, partial=bool(lessons))
+            # Сбой чтения делает сборку такой же неполной, как и фильтр по
+            # урокам: часть конспектов мы просто не видели. Разница только в
+            # том, что фильтр — это выбор, а сбой — случайность, и именно
+            # поэтому он опаснее. Без этой оговорки нечитаемый файл (битая
+            # кодировка, несинхронизированный плейсхолдер OneDrive, блокировка
+            # антивирусом) выглядел бы как удалённый, и все его чанки уходили
+            # бы из базы знаний — при том что на диске файл цел.
+            plan = self._plan(chunks, stored, partial=bool(lessons) or bool(failed))
 
             embedded = 0
             manifest: IndexManifest | None = None

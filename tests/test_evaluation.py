@@ -25,6 +25,7 @@ from zerocoder_assistant.evaluation import (
     recall_at,
     thresholds_range,
 )
+from zerocoder_assistant.evaluation.refusal import looks_like_refusal
 from zerocoder_assistant.evaluation.runner import Candidate, _simulate
 from zerocoder_assistant.observability import Stopwatch, UsageCounters, percentile
 
@@ -530,3 +531,126 @@ class TestSimulatedThreshold:
     def test_range_never_exceeds_the_upper_bound(self) -> None:
         """Округление к ближайшему давало точку ВЫШЕ `stop`."""
         assert max(thresholds_range(0.2, 0.25, 0.02)) <= 0.25
+
+
+class TestRefusalDetection:
+    """Опознание отказа. Метрика уже дважды врала — здесь закреплены оба случая."""
+
+    def test_substring_inside_a_word_is_not_a_negation(self) -> None:
+        """«кабиНЕТ» и «инТЕРНЕТ» содержат «нет», но отрицанием не являются.
+
+        Поиск подстрокой без границ слова превращал уверенную выдумку в
+        засчитанный отказ: хватало «конспект» и любого слова с «нет» внутри.
+        """
+        assert not looks_like_refusal("В конспектах описан личный кабинет n8n [1].")
+        assert not looks_like_refusal("Материал урока объясняет интернет-магазин [2].")
+
+    def test_negation_is_a_whole_word_on_both_sides(self) -> None:
+        """«НЕТерпение» начинается с «нет», но отрицанием не является.
+
+        Граница нужна с обеих сторон: начальная отсекает «кабинет», конечная —
+        слова, которые с «нет» начинаются.
+        """
+        assert not looks_like_refusal("В конспектах описано нетерпение пользователя [1].")
+
+    def test_scope_word_inside_another_word_does_not_count(self) -> None:
+        """«дезИНФОРМАЦИя» — не упоминание границ базы знаний.
+
+        Границы нужны обоим спискам, а не только отрицаниям: слово о базе,
+        найденное внутри чужого слова, даёт ту же пару признаков и то же
+        ложное «модель отказалась».
+        """
+        assert not looks_like_refusal(
+            "В уроке разбирается борьба с дезинформацией, а готовых рецептов нет."
+        )
+
+    def test_gap_disclaimer_after_a_cited_claim_is_not_a_refusal(self) -> None:
+        """Ветка B отвечает по существу и обязана оговорить пробел.
+
+        Считать такой ответ отказом значит снимать флаг галлюцинации с
+        уверенно выдуманного текста — то есть ровно то, ради чего метрика и
+        писалась.
+        """
+        branch_b = (
+            "Размер чанка задаётся параметром `CHUNK_TARGET_TOKENS` [1]. "
+            "Чем обосновано именно значение 400 токенов — во фрагментах не сказано."
+        )
+
+        assert not looks_like_refusal(branch_b)
+
+    def test_disclaimer_appended_to_a_cited_claim_is_not_a_refusal(self) -> None:
+        """Утверждение и оговорка в ОДНОМ предложении — всё ещё ветка B.
+
+        Найдено на живом прогоне: «...могут использоваться для хранения
+        векторов [1], хотя в конспектах это не указано». Проверка по
+        предложению целиком считала такое отказом, потому что оба признака в
+        нём есть. Решает порядок: отказ засчитывается, только если сложился
+        до первой ссылки.
+        """
+        compound = (
+            "Стоит взять локальное хранилище, такое как ChromaDB. "
+            "Оба варианта работают на своей машине [1], хотя в конспектах это прямо не указано."
+        )
+
+        assert not looks_like_refusal(compound)
+
+    def test_signals_split_by_a_citation_are_not_a_refusal(self) -> None:
+        """«В конспектах есть [1], но X не описан» — утверждение с оговоркой.
+
+        Признаки стоят по разные стороны от ссылки: упоминание базы — до,
+        отрицание — после. Отказ складывается по ПОСЛЕДНЕМУ из двух, поэтому
+        он оказывается после ссылки и не засчитывается. Если считать по
+        первому, такой ответ снова станет отказом.
+        """
+        assert not looks_like_refusal(
+            "В конспектах есть про размер чанка [1], но обоснование не описано."
+        )
+
+    def test_refusal_before_a_citation_in_the_same_sentence_counts(self) -> None:
+        """А если отказ стоит ПЕРЕД ссылкой, это по-прежнему отказ."""
+        assert looks_like_refusal("В конспектах этого нет, рядом лежит кэширование [1].")
+
+    def test_refusal_before_any_citation_counts(self) -> None:
+        """Ветка C отказывается первой, а ссылки приводит уже потом."""
+        assert looks_like_refusal("В конспектах этого нет. Рядом лежит кэширование [1], [2].")
+
+    def test_refusal_may_come_in_the_second_sentence(self) -> None:
+        """Пока первое предложение ничего не утверждает, отказ ещё впереди."""
+        assert looks_like_refusal("Эта тема в курсе не разбиралась. В материалах её нет.")
+
+    def test_wordings_absent_from_the_prompt_are_recognised(self) -> None:
+        """Модель отказывается и своими словами, не только словами промпта."""
+        assert looks_like_refusal("Такой информации у меня нет.")
+        assert looks_like_refusal("В предоставленном контексте ответа не содержится.")
+
+
+class TestFalseRefusal:
+    def test_model_refusal_on_answerable_question_is_a_failure(self) -> None:
+        """Поиск нашёл нужное, а модель всё равно отказалась — это провал.
+
+        Раньше такой исход считался правильным: `correct` смотрел только на
+        попадание урока в выдачу. Ассистент, отказывающий на каждом втором
+        отвечаемом вопросе при исправном поиске, показывал бы recall 100% и
+        «ложных отказов 0».
+        """
+        refused = outcome(("PEr03",), answer="В конспектах этого нет.")
+
+        assert refused.hit_at(1)
+        assert refused.answer_refused
+        assert not refused.correct
+        assert refused.false_refusal
+
+    def test_false_refusals_count_both_lines_of_defence(self) -> None:
+        outcomes = [
+            outcome(()),  # порог не пропустил ничего
+            outcome(("PEr03",), answer="В конспектах этого нет."),  # отказала модель
+            outcome(("PEr03",), answer="Перекрытие составляет 15% [1]."),  # ответила
+        ]
+
+        assert build_report(outcomes).false_refusals == 2
+
+    def test_answered_question_stays_correct(self) -> None:
+        answered = outcome(("PEr03",), answer="Перекрытие составляет 15% [1].")
+
+        assert answered.correct
+        assert not answered.false_refusal

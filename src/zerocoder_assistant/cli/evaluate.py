@@ -194,10 +194,6 @@ def ragas(
                     golden,
                     top_k=top_k,
                     use_cache=not no_cache,
-                    # Ответы генерируются заново: L3 хранит текст и источники,
-                    # но не фрагменты, а RAGAS сверяет ответ именно с ними.
-                    # Поиск при этом по-прежнему идёт из кэша.
-                    use_answer_cache=False,
                     answerer=answerer,
                 )
             finally:

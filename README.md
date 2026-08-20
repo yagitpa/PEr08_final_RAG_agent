@@ -294,6 +294,7 @@ flowchart LR
 | `zassist ask --repl` | Диалог с памятью: `/clear` — забыть, `/exit` — выйти |
 | `zassist eval run` | Метрики поиска по golden set. Не вызывает модель |
 | `zassist eval threshold` | Подобрать порог релевантности |
+| `zassist index preview --dump-clean` | Выложить очищенные конспекты, чтобы посмотреть глазами |
 | `zassist eval ragas` | Метрики RAGAS (нужна отдельная установка) |
 | `zassist cache stats` | Состояние кэша |
 
@@ -329,6 +330,7 @@ zassist ask "вопрос" --no-cache
 |---|---|---|
 | `TOP_K` | 5 | Сколько фрагментов уходит в контекст |
 | `RELEVANCE_THRESHOLD` | 0.30 | Ниже этого сходства фрагмент не берётся |
+| `CLEAN_DIR` | `./storage/clean` | Куда `--dump-clean` кладёт очищенные конспекты |
 | `OVERFETCH_FACTOR` | 3 | Во сколько раз больше кандидатов запросить до отсечения |
 | `CHUNK_TARGET_TOKENS` | 400 | Целевой размер чанка |
 | `CHUNK_OVERLAP_PCT` | 15 | Перекрытие соседних чанков |

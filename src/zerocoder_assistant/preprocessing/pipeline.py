@@ -16,14 +16,20 @@ from pathlib import Path
 from zerocoder_assistant.config.settings import ChunkingConfig, get_settings
 from zerocoder_assistant.preprocessing.chunker import Chunker
 from zerocoder_assistant.preprocessing.cleaner import TextCleaner
-from zerocoder_assistant.preprocessing.headings import is_excluded_section
+from zerocoder_assistant.preprocessing.headings import is_excluded_section, sanitize_heading
 from zerocoder_assistant.preprocessing.markdown import (
     split_blocks,
     split_frontmatter,
     split_sections,
 )
 from zerocoder_assistant.preprocessing.metadata import build_note_metadata
-from zerocoder_assistant.preprocessing.models import Block, Chunk, ProcessedNote, Section
+from zerocoder_assistant.preprocessing.models import (
+    Block,
+    Chunk,
+    CleanedSection,
+    ProcessedNote,
+    Section,
+)
 from zerocoder_assistant.preprocessing.section_merger import PreparedSection, SectionMerger
 from zerocoder_assistant.preprocessing.tokenization import get_token_counter
 
@@ -35,6 +41,23 @@ NOTE_GLOB = "*.md"
 def iter_note_files(notes_dir: Path) -> Iterator[Path]:
     """Все файлы конспектов под указанным корнем, в устойчивом порядке."""
     yield from sorted(notes_dir.rglob(NOTE_GLOB))
+
+
+def _as_cleaned(item: PreparedSection) -> CleanedSection:
+    """Очищенные блоки секции, склеенные обратно в связный текст.
+
+    Блоки разделяются пустой строкой — тем же, чем они были разделены в
+    исходнике. Иначе абзац и следующий за ним листинг слипаются в одну строку,
+    и посмотреть глазами, ради чего всё затевалось, не получится.
+    """
+    return CleanedSection(
+        # Заголовки санируются так же, как в чанкере: дамп обязан показывать
+        # то, что уедет в индекс. Иначе «Результат дня в эмодзи» стоял бы в
+        # дампе с картинкой, а в contextual header чанка — без неё.
+        heading_path=tuple(sanitize_heading(part) for part in item.section.heading_path),
+        text="\n\n".join(block.text for block in item.blocks),
+        tokens=item.tokens,
+    )
 
 
 class NotePreprocessor:
@@ -96,6 +119,7 @@ class NotePreprocessor:
             chunks=chunks,
             skipped_sections=skipped,
             dropped_boilerplate=dropped,
+            cleaned_sections=tuple(_as_cleaned(item) for item in prepared),
         )
 
     @staticmethod

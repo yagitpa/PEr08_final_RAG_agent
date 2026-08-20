@@ -282,6 +282,10 @@ MODULE_NUMBER_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"модул[ья]\s*(\d+)", flags=re.IGNORECASE
 )
 
+#: Глубже шестого уровня заголовков в Markdown нет: «#######» перестаёт быть
+#: заголовком и печатается как есть.
+MAX_HEADING_LEVEL: Final[int] = 6
+
 #: Разделитель пути заголовков в contextual header чанка.
 HEADING_PATH_SEPARATOR: Final[str] = " > "
 

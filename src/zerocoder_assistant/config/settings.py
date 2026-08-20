@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # вместе с командой `notes`.
     chroma_dir: Path = Path("./storage/chroma")
     cache_db: Path = Path("./storage/cache.db")
+    #: Куда `index preview --dump-clean` выкладывает очищенные конспекты.
+    #: Внутри storage/, а значит под .gitignore: это тексты уроков, и в
+    #: публичном репозитории им не место.
+    clean_dir: Path = Path("./storage/clean")
     prompts_dir: Path = Path("./prompts")
 
     embed_batch_size: int = Field(default=64, ge=1, le=2048)
@@ -192,7 +196,7 @@ class Settings(BaseSettings):
 
         Иначе поведение команд зависит от того, из какой папки их запустили.
         """
-        for field in ("notes_dir", "chroma_dir", "cache_db", "prompts_dir"):
+        for field in ("notes_dir", "chroma_dir", "cache_db", "prompts_dir", "clean_dir"):
             value: Path = getattr(self, field)
             if not value.is_absolute():
                 object.__setattr__(self, field, (PROJECT_ROOT / value).resolve())

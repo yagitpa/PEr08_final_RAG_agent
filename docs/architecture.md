@@ -287,13 +287,15 @@ PEr08_final_RAG_agent/
 ├─ README.md                      # схема пайплайна, запуск, параметры
 ├─ .env.example  .gitignore  pyproject.toml
 ├─ requirements.txt  requirements-eval.txt
-├─ prompts/                       # rag_answer_v1.md (+ note_author_v1.md, этап авторства)
+├─ prompts/                       # rag_answer_v1.md, rag_answer_v2.md (по умолчанию v2)
+│                                 # note_author_v1.md — НЕТ (вместе с P1)
 ├─ src/zerocoder_assistant/
 │  ├─ __main__.py                 # точка входа CLI
-│  ├─ cli/                        # notes | index | search | ask | eval | cache, options
+│  ├─ cli/                        # index | search | ask | eval | cache, options
+│  │                              # notes — НЕТ (вместе с P1)
 │  ├─ config/                     # settings.py (pydantic-settings), constants.py
-│  ├─ acquisition/                # base, browser_handoff, html, pdf, docx
-│  ├─ authoring/                  # note_builder
+│  ├─ acquisition/                # НЕТ: base, browser_handoff, html, pdf, docx
+│  ├─ authoring/                  # НЕТ: note_builder
 │  ├─ preprocessing/              # markdown, headings, cleaner, section_merger,
 │  │                              # chunker, metadata, models, tokenization, pipeline
 │  ├─ embeddings/                 # base, openai_compatible, factory
@@ -305,11 +307,13 @@ PEr08_final_RAG_agent/
 │  ├─ cache/                      # sqlite_cache (3 таблицы), keys
 │  ├─ evaluation/                 # golden_set, metrics, runner (+ ragas_runner)
 │  └─ observability/              # timing (секундомер), counters (попадания в кэш)
-├─ data/     raw/ (gitignore) · notes/ (может указывать наружу)
+├─ data/     notes/ (может указывать наружу; raw/ появится вместе с P1)
 └─ storage/  chroma/ · cache.db · index_manifest.json   (gitignore)
 ```
 
 В корне — только конфигурация и README.
+
+**Помеченное «НЕТ» не написано.** Конвейер авторства (P1) остался проектом: конспекты пишутся вручную, команды `notes` нет, настройки `RAW_DIR` нет тоже — она бы ничего не меняла. Разделение при этом не пропало впустую, оно и позволяет менять параметры чанкинга, не трогая конспекты.
 
 **CLI:**
 
@@ -322,7 +326,7 @@ eval run [--answers] [--top-k N] [--export out.jsonl]                # гото�
 eval threshold [--from 0.25] [--to 0.60] [--step 0.025]              # готово
 ask "вопрос" [--lesson PEr06] [--top-k 5] [--no-cache] [--verbose]   # готово
 ask --repl [те же фильтры]        # диалог с памятью, /clear /help /exit  # готово
-notes build --raw <file> [--lesson PEr08]                            # этап 1 авторства
+notes build --raw <file> [--lesson PEr08]                            # НЕ РЕАЛИЗОВАНО
 eval ragas [--limit N] [--metrics СПИСОК]                            # этап 8
 ```
 

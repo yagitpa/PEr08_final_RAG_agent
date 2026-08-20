@@ -14,6 +14,7 @@ from __future__ import annotations
 import statistics
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from zerocoder_assistant.config.constants import (
@@ -22,6 +23,8 @@ from zerocoder_assistant.config.constants import (
     CONTENT_TYPE_PRACTICE,
     CONTENT_TYPE_SUMMARY,
     CONTENT_TYPE_THEORY,
+    HEADING_PATH_SEPARATOR,
+    MAX_HEADING_LEVEL,
 )
 from zerocoder_assistant.observability.timing import STAGE_ORDER
 
@@ -208,6 +211,97 @@ def render_histogram(
         bar = BAR_CHAR * _bar_length(count, peak, width)
         lines.append(f"{label:>{label_width}} | {bar:<{width}} {count:>{count_width}}")
     return "\n".join(lines)
+
+
+def render_clean_note(processed: ProcessedNote) -> str:
+    """Очищенный конспект в виде Markdown — чтобы смотреть глазами.
+
+    Шапка перечисляет то, ради чего дамп и делается: сколько секций выброшено
+    целиком и сколько шаблонных абзацев снято. Без этих чисел читатель видит
+    только результат и не знает, чего в нём не хватает.
+
+    Уровень заголовка берётся из длины пути, а не из исходного файла. После
+    отбора служебных разделов исходные уровни идут с пропусками, и
+    воспроизводить их значило бы показывать дырявую структуру там, где на
+    деле стройная.
+    """
+    note = processed.note
+    lines = [
+        f"# {note.lesson_title}",
+        "",
+        f"- урок: {note.lesson_id or '?'}",
+        f"- модуль: {note.module or '?'}",
+        f"- источник: {note.source_file}",
+        f"- секций после отбора: {len(processed.cleaned_sections)}",
+        f"- выброшено служебных секций: {len(processed.skipped_sections)}",
+        f"- снято шаблонных и служебных абзацев: {processed.dropped_boilerplate}",
+        f"- чанков получилось: {len(processed.chunks)}",
+    ]
+    if processed.skipped_sections:
+        lines.append(f"- что выброшено: {', '.join(processed.skipped_sections)}")
+
+    # Предупреждение обязательное, а не вежливое: по корпусу слияние убирает
+    # 305 секций из 869, то есть каждую третью. Без этой строки читатель
+    # сверит дамп с `index preview` и решит, что одно из двух врёт.
+    lines.extend(
+        [
+            "",
+            "> Это состояние ДО чанкинга. Дальше мелкие соседние секции сливаются,",
+            "> поэтому в индексе заголовков окажется меньше, чем здесь.",
+        ]
+    )
+
+    for section in processed.cleaned_sections:
+        # Первый элемент пути — заголовок H1 самого конспекта, и он уже стоит
+        # шапкой файла. Повторять его в каждой секции значит утопить в нём то,
+        # ради чего дамп открыли: чем секции друг от друга отличаются.
+        path = section.heading_path
+        if path and path[0] == note.lesson_title:
+            path = path[1:]
+        # +1: первый уровень занят названием конспекта.
+        level = min(max(len(path), 1) + 1, MAX_HEADING_LEVEL)
+        title = HEADING_PATH_SEPARATOR.join(path) or "(без заголовка)"
+        lines.extend(["", f"{'#' * level} {title}", f"<!-- токенов: {section.tokens} -->", ""])
+        lines.append(section.text)
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def clean_note_filenames(notes: Sequence[ProcessedNote]) -> dict[str, str]:
+    """Имя файла дампа для каждого конспекта; ключ — `source_file`.
+
+    Раскладка плоская, папки модулей не зеркалятся, и причина измерена:
+    `storage/clean/<Модуль ...>/<PEmB01.2_...>.md` в рабочем дереве проекта
+    доходит до 273 символов при пределе Windows в 260 — запись падает на самых
+    длинных названиях. Плоское имя укладывается в 217.
+
+    Столкновения имён при этом надо разрешать, а не надеяться на их отсутствие:
+    имя файла в корпусе начинается с идентификатора урока и уникально сегодня,
+    но дамп молча теряет конспект, если однажды это перестанет быть правдой.
+    Поэтому совпавшее имя получает приставкой папку модуля, а если и это не
+    развело — порядковый номер.
+    """
+    used: set[str] = set()
+    names: dict[str, str] = {}
+
+    for processed in notes:
+        source = PurePosixPath(processed.note.source_file)
+        candidates = [source.name]
+        if source.parts[:-1]:
+            candidates.append(f"{'_'.join(source.parts[:-1])}_{source.name}")
+
+        chosen = next((name for name in candidates if name not in used), None)
+        if chosen is None:
+            stem, suffix = source.stem, source.suffix
+            counter = 2
+            while f"{stem}_{counter}{suffix}" in used:
+                counter += 1
+            chosen = f"{stem}_{counter}{suffix}"
+
+        used.add(chosen)
+        names[processed.note.source_file] = chosen
+
+    return names
 
 
 def render_stats(stats: CorpusStats, config: ChunkingConfig) -> str:
@@ -535,24 +629,30 @@ def render_threshold_sweep(points: Sequence[ThresholdPoint], current: float) -> 
 
     Показываются обе ошибки сразу: подняв порог, всегда можно довести отказы до
     идеала — ценой ответов на вопросы, ответ на которые есть.
+
+    Колонка «смежных» стоит отдельно от доли правильных намеренно. Эти вопросы
+    в оценку порога не входят — отказ на них даёт модель, — но видеть, чем
+    оплачен их отсев, нужно прямо здесь, в строке с recall.
     """
     if not points:
         return "(нечего показывать)"
 
     best = max(points, key=lambda point: (point.score, -abs(point.threshold - current)))
     lines = [
-        "порог   recall@k  ложных   верных    доля",
-        "                  отказов  отказов   правильных",
+        "порог   recall@k  ложных   чужих   смежных   доля",
+        "                  отказов  отказов отказов   правильных",
     ]
     for point in points:
-        report = point.report
         mark = " <- сейчас" if abs(point.threshold - current) < 1e-9 else ""
         if point is best:
             mark += " <- лучший"
+        foreign, foreign_total = point.foreign_refused
+        adjacent, adjacent_total = point.adjacent_refused
         lines.append(
             f"{point.threshold:5.2f}   {_percent(point.recall):>7}  "
-            f"{report.false_refusals:>7}  "
-            f"{sum(s.refused for s in report.refusals):>3}/{report.unanswerable:<3}  "
+            f"{point.report.false_refusals:>7}  "
+            f"{foreign:>3}/{foreign_total:<3} "
+            f"{adjacent:>3}/{adjacent_total:<3}   "
             f"{_percent(point.score):>7}{mark}"
         )
 
@@ -560,8 +660,11 @@ def render_threshold_sweep(points: Sequence[ThresholdPoint], current: float) -> 
     lines.append(
         _field("Лучший по доле правильных", f"{best.threshold:.2f} ({_percent(best.score)})")
     )
-    lines.append("Значение из настроек — компромисс: ложный отказ окончателен, а слабый")
-    lines.append("фрагмент модель отсеет сама, поэтому порог смещают вниз от максимума.")
+    lines.append("Доля считается по вопросам, исход которых решает порог: отвечаемые плюс")
+    lines.append("заведомо чужие темы. Смежные темы в неё не входят — отказ на них даёт")
+    lines.append("модель, и требовать того же от порога значит покупать отказы падением")
+    lines.append("recall. Ложный отказ при этом окончателен, а слабый фрагмент модель")
+    lines.append("отсеет сама, поэтому из равных по доле значений берут нижнее.")
     return "\n".join(lines)
 
 

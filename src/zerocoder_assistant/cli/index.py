@@ -23,7 +23,9 @@ import click
 from zerocoder_assistant.config.settings import get_settings
 from zerocoder_assistant.reporting import (
     build_corpus_stats,
+    clean_note_filenames,
     render_chunk_sample,
+    render_clean_note,
     render_histogram,
     render_index_report,
     render_index_status,
@@ -90,6 +92,12 @@ def index_group() -> None:
     default=None,
     help="Выгрузить все чанки в JSONL (id, text, metadata).",
 )
+@click.option(
+    "--dump-clean",
+    "dump_clean",
+    is_flag=True,
+    help="Выложить очищенные конспекты (до разбивки на чанки) в CLEAN_DIR.",
+)
 @click.option("--no-histogram", is_flag=True, help="Не печатать гистограмму размеров.")
 def preview(
     notes_dir: Path | None,
@@ -97,6 +105,7 @@ def preview(
     limit: int | None,
     samples: int,
     export_path: Path | None,
+    dump_clean: bool,
     no_histogram: bool,
 ) -> None:
     """Сухой прогон препроцессинга: статистика, гистограмма и примеры чанков.
@@ -133,6 +142,10 @@ def preview(
 
     stats = build_corpus_stats(notes, config)
     click.echo(render_stats(stats, config))
+
+    if dump_clean:
+        written, target = _dump_clean(notes, settings.clean_dir)
+        click.echo(f"\nОчищенные конспекты ({written}): {target}")
 
     if not no_histogram:
         click.echo("\nРаспределение размеров чанков (токены):\n")
@@ -241,6 +254,26 @@ def _missing_notes(root: Path) -> click.ClickException:
             ]
         )
     )
+
+
+def _dump_clean(notes: Sequence[ProcessedNote], target: Path) -> tuple[int, Path]:
+    """Выложить очищенные конспекты по одному файлу на конспект.
+
+    Каталог не очищается перед записью. Соблазн был: после прогона с `--lesson`
+    рядом остаются дампы от прошлых запусков, и картина выглядит смешанной. Но
+    команда называется `preview` и до сих пор ничего не удаляла; тихо сносить
+    содержимое каталога, путь к которому задаётся настройкой и может указывать
+    куда угодно, — цена ошибки несоизмеримая с удобством. Устаревшие файлы
+    видны по времени изменения.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    names = clean_note_filenames(notes)
+
+    for processed in notes:
+        path = target / names[processed.note.source_file]
+        path.write_text(render_clean_note(processed), encoding="utf-8")
+
+    return len(notes), target
 
 
 def _process_notes(

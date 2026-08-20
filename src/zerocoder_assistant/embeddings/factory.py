@@ -7,6 +7,7 @@ import logging
 from zerocoder_assistant.config.settings import Settings, get_settings
 from zerocoder_assistant.embeddings.base import EmbeddingProvider
 from zerocoder_assistant.embeddings.openai_compatible import OpenAICompatibleEmbeddings
+from zerocoder_assistant.errors import UnknownProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,9 @@ def build_embedding_provider(settings: Settings | None = None) -> EmbeddingProvi
     credentials = settings.credentials(provider)
 
     if provider not in OPENAI_COMPATIBLE:
-        raise NotImplementedError(
-            f"Поставщик эмбеддингов {provider!r} пока не реализован. "
-            f"Доступны: {', '.join(sorted(OPENAI_COMPATIBLE))}"
-        )
+        # Не NotImplementedError: для того, кто настраивает .env, это ровно
+        # то же самое, что опечатка в имени, — и показывать это надо так же.
+        raise UnknownProviderError(provider, tuple(sorted(OPENAI_COMPATIBLE)))
 
     logger.debug("Эмбеддинги: %s, модель %s", provider, settings.embed_model)
     return OpenAICompatibleEmbeddings(

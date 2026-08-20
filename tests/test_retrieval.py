@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
 from fakes import FakeEmbedder
 
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
@@ -83,8 +84,14 @@ class TestDeduplicate:
         assert [hit.chunk_id for hit in kept] == ["a"]
         assert removed == 1
 
-    def test_overlapping_chunks_collapse(self) -> None:
-        """Перекрытие в 15% даёт именно такие пары — дословно совпадающие хвосты."""
+    def test_near_verbatim_repeat_collapses(self) -> None:
+        """Ради чего механизм и существует: секция, повторённая почти слово в слово.
+
+        Прежде этот тест назывался «перекрытие чанков схлопывается» и внушал
+        ложную уверенность: пара здесь совпадает почти целиком, а настоящее
+        перекрытие в 15% даёт сходство около 0.09 (замер по корпусу) и порога
+        0.8 не достигает даже близко. Проверяется дословный повтор, и только он.
+        """
         shared = (
             "перекрытие набирается целыми предложениями с конца предыдущего чанка "
             "чтобы не терять смысловую связность между соседними фрагментами текста"
@@ -97,6 +104,36 @@ class TestDeduplicate:
 
         assert len(kept) == 1
         assert removed == 1
+
+    def test_designed_overlap_survives(self) -> None:
+        """Соседние чанки с проектным перекрытием обязаны дойти до модели оба.
+
+        Они различаются на 85% текста, и выбросить один значит потерять эти
+        85%. Тест закрепляет границу с другой стороны: порог не должен
+        опускаться до значений, на которых перекрытие считается дублем.
+        """
+        tail = "перекрытие набирается целыми предложениями с конца предыдущего чанка"
+        first = (
+            "порог релевантности отсекает слабые фрагменты до передачи в модель "
+            "а дедупликация схлопывает повторы уже после отсечения "
+            "и только потом выдача режется до top_k "
+            f"{tail}"
+        )
+        second = (
+            f"{tail} "
+            "контекст собирается целыми фрагментами начиная с самых сильных "
+            "а бюджет считается в токенах а не в символах "
+            "и вопрос ставится после фрагментов а не перед ними"
+        )
+        kept, removed = deduplicate([FakeHit("a", first, 0.9), FakeHit("b", second, 0.8)], 0.8)
+
+        assert [hit.chunk_id for hit in kept] == ["a", "b"]
+        assert removed == 0
+
+    def test_zero_threshold_is_refused(self) -> None:
+        """При нуле похожими считаются любые два фрагмента — от выдачи остаётся один."""
+        with pytest.raises(ValueError, match="больше нуля"):
+            deduplicate([FakeHit("a", "первый текст", 0.9)], 0.0)
 
     def test_more_relevant_survives(self) -> None:
         """Вход отсортирован по убыванию релевантности — остаётся первый."""
@@ -242,3 +279,72 @@ class TestRetrieverCache:
         again = retriever.retrieve("вопрос", use_cache=False)
 
         assert not again.from_cache
+
+
+@dataclass
+class FakeRawHit:
+    """То, что отдаёт хранилище, до превращения в RetrievedChunk."""
+
+    chunk_id: str
+    text: str
+    similarity: float
+    metadata: dict
+
+
+class TestThresholdBoundary:
+    """Сходство ровно на пороге — фрагмент берётся.
+
+    Граница не украшение: рабочее значение подобрано перебором по golden set,
+    и сдвиг на один шаг сравнения меняет и recall, и число отказов. Проверялось
+    это только значениями заведомо выше и заведомо ниже, поэтому `>` вместо
+    `>=` тест бы не заметил.
+    """
+
+    def params(self, settings: Settings, threshold: float) -> object:
+        from zerocoder_assistant.cache.keys import RetrievalParams
+
+        return RetrievalParams(
+            embed_model="fake-embed-v1",
+            top_k=settings.top_k,
+            overfetch_factor=settings.overfetch_factor,
+            relevance_threshold=threshold,
+            dedup_threshold=settings.dedup_threshold,
+            filters=None,
+            index_version="тест",
+        )
+
+    def select(self, settings: Settings, store: ChromaVectorStore, similarities: list[float]):
+        retriever = Retriever(settings, embedder=FakeEmbedder(), store=store)
+        try:
+            raw = [
+                FakeRawHit(f"c{index}", f"фрагмент номер {index}", value, {"lesson_id": "PEr08"})
+                for index, value in enumerate(similarities)
+            ]
+            return retriever._select("вопрос", raw, self.params(settings, 0.5))
+        finally:
+            retriever.close()
+
+    def test_similarity_equal_to_threshold_is_kept(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        result = self.select(settings, store, [0.5])
+
+        assert [chunk.chunk_id for chunk in result.chunks] == ["c0"]
+        assert result.below_threshold == 0
+
+    def test_similarity_just_below_is_cut(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        result = self.select(settings, store, [0.499])
+
+        assert result.chunks == []
+        assert result.below_threshold == 1
+
+    def test_best_candidate_is_reported_even_when_everything_is_cut(
+        self, settings: Settings, store: ChromaVectorStore
+    ) -> None:
+        """Иначе о близости запроса к базе судить было бы не по чему."""
+        result = self.select(settings, store, [0.4, 0.3])
+
+        assert result.chunks == []
+        assert result.top_candidate_similarity == 0.4

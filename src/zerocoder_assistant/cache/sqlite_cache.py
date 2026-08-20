@@ -244,12 +244,28 @@ def _resolve_table(level: str) -> str:
 
 
 def _add_missing_columns(connection: sqlite3.Connection) -> None:
-    """Дописать колонки, появившиеся после создания файла кэша."""
+    """Дописать колонки, появившиеся после создания файла кэша.
+
+    Между проверкой и ALTER есть окно: два процесса (например, `ask --repl` и
+    прогон оценки в соседнем терминале) видят одинаковую нехватку колонки, и
+    второй падает с «duplicate column name». Файл кэша при этом уже в порядке,
+    а команда завершается ошибкой на ровном месте.
+
+    Поэтому гонка не предотвращается, а признаётся безвредной: колонку добавил
+    кто-то другой, результат тот же. Прочие OperationalError по-прежнему
+    поднимаются — испорченный файл кэша молчать не должен.
+    """
     for table, column, kind in _ADDED_COLUMNS:
         existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            logger.info("Кэш: добавляю колонку %s.%s", table, column)
+        if column in existing:
+            continue
+        logger.info("Кэш: добавляю колонку %s.%s", table, column)
+        try:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+            logger.debug("Колонку %s.%s успел добавить другой процесс", table, column)
 
 
 def _now() -> str:

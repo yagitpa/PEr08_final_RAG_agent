@@ -82,7 +82,12 @@ def ask(
     try:
         with Answerer(settings, cache=cache) as answerer:
             if question:
-                _respond(answerer, question, history, options)
+                # Разовый вопрос отвечает командой: сбой = ненулевой код возврата.
+                # В диалоге тот же сбой не должен уносить память сессии.
+                if history is None:
+                    _respond(answerer, question, history, options)
+                else:
+                    _respond_safely(answerer, question, history, options)
             if history is not None:
                 _run_repl(answerer, history, options, settings.history_pairs)
     except AssistantError as exc:
@@ -129,8 +134,33 @@ def _run_repl(
             click.echo(outcome.message)
             continue
 
-        _respond(answerer, line, history, options)
+        _respond_safely(answerer, line, history, options)
         click.echo(SEPARATOR)
+
+
+def _respond_safely(
+    answerer: Answerer, question: str, history: SessionHistory, options: _Options
+) -> None:
+    """Ответить, не уронив диалог из-за внешнего сбоя.
+
+    Обрыв сети, тайм-аут, исчерпанная квота — обстоятельства, а не поломка
+    программы, и стоят они студенту всей памяти сессии: разговор, в котором
+    уже был контекст, приходилось начинать заново. Сообщение печатается
+    строкой, приглашение возвращается, следующий вопрос задаётся сразу.
+
+    Ловится только предсказуемый отказ. Настоящая ошибка в коде обязана
+    прервать работу и показать трассировку — глотать её здесь значило бы
+    прятать дефект за приглашением ввода.
+
+    Ошибки, при которых ассистент не работает в принципе (нет промпта, индекс
+    собран другой моделью), сюда не попадают: они возникают при создании
+    `Answerer`, то есть до входа в цикл.
+    """
+    try:
+        _respond(answerer, question, history, options)
+    except AssistantError as exc:
+        click.echo("")
+        click.echo(f"Не получилось ответить. {exc}")
 
 
 def _respond(

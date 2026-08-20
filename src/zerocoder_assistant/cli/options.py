@@ -13,6 +13,8 @@ from typing import TypeVar
 
 import click
 
+from zerocoder_assistant.config.constants import CONTENT_TYPES
+
 _Command = TypeVar("_Command", bound=Callable[..., object])
 
 
@@ -34,12 +36,16 @@ def retrieval_options(command: _Command) -> _Command:
             metavar="N",
             help="Искать только в указанных модулях: --module 5.",
         ),
+        # Choice, а не свободная строка: опечатка в типе давала пустую выдачу,
+        # неотличимую от «в базе такого нет». Список берётся из констант —
+        # добавить тип означает поправить одно место, а не два.
         click.option(
             "--content-type",
             "content_types",
             multiple=True,
+            type=click.Choice(CONTENT_TYPES),
             metavar="TYPE",
-            help="Ограничить тип содержимого: theory, summary, practice, code, actualization.",
+            help=f"Ограничить тип содержимого: {', '.join(CONTENT_TYPES)}.",
         ),
         click.option(
             "--top-k",

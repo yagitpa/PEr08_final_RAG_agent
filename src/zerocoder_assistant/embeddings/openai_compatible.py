@@ -12,9 +12,10 @@ import logging
 from collections.abc import Iterator, Sequence
 from typing import Final
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from zerocoder_assistant.config.settings import ProviderCredentials
+from zerocoder_assistant.errors import ProviderRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class OpenAICompatibleEmbeddings:
         self._dimension: int | None = KNOWN_DIMENSIONS.get(model)
         # Повторы при сетевых сбоях и 429 берёт на себя сам SDK.
         self._client = OpenAI(
-            api_key=credentials.api_key,
+            api_key=credentials.api_key.get_secret_value(),
             base_url=credentials.base_url,
             timeout=timeout,
             max_retries=max_retries,
@@ -74,15 +75,21 @@ class OpenAICompatibleEmbeddings:
 
         vectors: list[list[float]] = []
         for batch in self._batches(texts):
-            response = self._client.embeddings.create(model=self._model, input=list(batch))
+            try:
+                response = self._client.embeddings.create(model=self._model, input=list(batch))
+            except OpenAIError as exc:
+                raise ProviderRequestError(
+                    f"Векторизация через {self._model} не удалась", exc
+                ) from exc
             # Порядок в ответе не гарантирован контрактом — сортируем по index.
             ordered = sorted(response.data, key=lambda item: item.index)
             vectors.extend(item.embedding for item in ordered)
 
         if len(vectors) != len(texts):
-            raise RuntimeError(
-                f"API вернул {len(vectors)} векторов на {len(texts)} текстов — "
-                "порядок и полнота выдачи нарушены, индексировать нельзя"
+            raise ProviderRequestError(
+                f"Векторизация через {self._model}",
+                f"на {len(texts)} текстов вернулось {len(vectors)} векторов — "
+                "полнота выдачи нарушена, индексировать нельзя",
             )
 
         if self._dimension is None and vectors:

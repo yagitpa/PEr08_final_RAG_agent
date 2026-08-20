@@ -16,6 +16,7 @@ from __future__ import annotations
 from zerocoder_assistant.config.constants import (
     FOLLOW_UP_MARKERS,
     FOLLOW_UP_MAX_WORDS,
+    FOLLOW_UP_MIN_STANDALONE_WORDS,
     FOLLOW_UP_OPENERS,
     WORD_PATTERN,
 )
@@ -37,8 +38,15 @@ def is_follow_up(question: str, *, max_words: int = FOLLOW_UP_MAX_WORDS) -> bool
     Одного первого признака мало. «Что такое overlap и зачем он нужен?» —
     самодостаточный вопрос, и подмешивать в него предыдущую реплику значит
     уводить поиск от того, что спросили сейчас.
+
+    Совсем короткий вопрос — исключение из правила «нужны оба признака».
+    В «Зачем?» отсылке негде стоять, но и предметного слова в нём нет ни
+    одного: искать по такому тексту нечего, и без предыдущей реплики он
+    гарантированно даст отказ.
     """
     tokens = words(question)
     if not tokens or len(tokens) > max_words:
         return False
+    if len(tokens) < FOLLOW_UP_MIN_STANDALONE_WORDS:
+        return True
     return tokens[0] in FOLLOW_UP_OPENERS or bool(FOLLOW_UP_MARKERS.intersection(tokens))

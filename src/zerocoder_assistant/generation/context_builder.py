@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from zerocoder_assistant.preprocessing.models import content_hash
 from zerocoder_assistant.preprocessing.tokenization import TokenCounter
 
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
@@ -35,16 +36,36 @@ QUESTION_HEADER = "Вопрос студента:"
 FRAGMENT_SEPARATOR = "\n\n"
 BLOCK_SEPARATOR = "\n\n"
 
+#: Листинги и инлайн-код. Изымаются ДО разбора ссылок: индексация в примере
+#: на Python — не ссылка на фрагмент, а `x = [256]` не выдуманный источник.
+#: Корпус — конспекты по промпт-инжинирингу, кода в ответах много, и без этого
+#: индикатор галлюцинаций мерил бы долю ответов с листингами.
+#:
+#: Незакрытая ограда (```python без парной) не удаляется: обрезать до конца
+#: текста опаснее, чем разобрать лишний фрагмент как прозу.
+CODE_SPAN_PATTERN = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", flags=re.DOTALL)
+
 #: Ссылка на фрагмент в ответе модели. Формат тот же, что и в нумерации выше:
 #: один источник истины на два направления — как пишем номера в контекст и как
 #: читаем их обратно из ответа.
 #:
-#: Просмотр назад отсекает индексацию в коде. Корпус — конспекты по
-#: промпт-инжинирингу с примерами на Python, и модель их цитирует: без этой
-#: проверки `items[0]` и `data[42]` объявлялись бы выдуманными ссылками, а
-#: индикатор галлюцинаций мерил бы долю ответов с кодом. Число не ограничено
-#: тремя цифрами намеренно: `[1234]` — тоже выдумка, и её надо поймать.
-CITATION_PATTERN = re.compile(r"(?<![\w\]\)'\"`])\[(\d+)\]")
+#: Просмотр назад различает ссылку и индексацию по алфавиту: в этом корпусе
+#: код латинский, а проза кириллическая. `items[0]` и `data[42]` — индексация,
+#: `векторов[1]` — ссылка, приписанная к слову вплотную. Прежний вариант
+#: запрещал перед скобкой любую букву и такую ссылку терял.
+#:
+#: Число не ограничено тремя цифрами намеренно: `[1234]` — тоже выдумка,
+#: и её надо поймать.
+CITATION_PATTERN = re.compile(r"(?<![A-Za-z_\]\)\'\"`])\[(\d+)\]")
+
+
+def without_code(text: str) -> str:
+    """Текст без листингов и инлайн-кода.
+
+    Пробел вместо вырезанного куска, а не пустая строка: иначе слова по краям
+    склеиваются и разбиение на предложения ошибается.
+    """
+    return CODE_SPAN_PATTERN.sub(" ", text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +150,18 @@ class ContextBuilder:
         return block
 
 
+#: Отпечаток обёртки, в которой фрагменты и вопрос едут модели.
+#:
+#: Входит в ключ кэша ответов наравне с версией системного промпта. Причина та
+#: же: заголовки и порядок блоков — часть инструкции, которую видит модель, и
+#: перестановка вопроса вперёд фрагментов меняет ответ. Пока отпечатка не было,
+#: правка этих строк молча продолжала отдавать ответы, посчитанные по прежней
+#: обёртке, — ровно тот тихий обман, ради которого версия промпта и заведена.
+USER_TEMPLATE_VERSION = content_hash(
+    "\x00".join([FRAGMENTS_HEADER, QUESTION_HEADER, BLOCK_SEPARATOR, FRAGMENT_SEPARATOR])
+)
+
+
 def render_user_message(context_text: str, question: str) -> str:
     """Сообщение пользователя: сначала фрагменты, в конце вопрос."""
     return BLOCK_SEPARATOR.join([FRAGMENTS_HEADER, context_text, QUESTION_HEADER, question.strip()])
@@ -137,7 +170,7 @@ def render_user_message(context_text: str, question: str) -> str:
 def cited_numbers(answer: str) -> list[int]:
     """Номера фрагментов, на которые сослалась модель (в порядке первого упоминания)."""
     seen: dict[int, None] = {}
-    for match in CITATION_PATTERN.finditer(answer):
+    for match in CITATION_PATTERN.finditer(without_code(answer)):
         seen.setdefault(int(match.group(1)), None)
     return list(seen)
 

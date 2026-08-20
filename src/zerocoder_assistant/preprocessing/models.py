@@ -132,6 +132,23 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class CleanedSection:
+    """Секция после отбора и очистки, но до разбивки на чанки.
+
+    Существует ради наблюдаемости. Очистка — самый непрозрачный шаг конвейера:
+    она снимает эмодзи, разметку, административные строки и целые служебные
+    секции, и по чанкам уже не видно, что именно исчезло, — там текст разрезан
+    и снабжён contextual header. Держать здесь промежуточный результат дешевле,
+    чем заводить второй проход очистки для показа: два прохода однажды
+    разойдутся, и показывать будут не то, что уходит в индекс.
+    """
+
+    heading_path: tuple[str, ...]
+    text: str
+    tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessedNote:
     """Результат препроцессинга одного файла конспекта."""
 
@@ -139,3 +156,5 @@ class ProcessedNote:
     chunks: list[Chunk]
     skipped_sections: list[str] = field(default_factory=list)
     dropped_boilerplate: int = 0
+    #: Тот же текст, что уехал в чанки, но ещё цельными секциями.
+    cleaned_sections: tuple[CleanedSection, ...] = ()

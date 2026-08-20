@@ -322,6 +322,26 @@ class TestCitationsInCode:
         """Ограничение в три цифры пропускало бы [1234] как несуществующий номер."""
         assert unknown_citations("По фрагменту [1234].", available=5) == [1234]
 
+    def test_literal_list_inside_a_fence_is_not_a_citation(self) -> None:
+        """Просмотра назад мало: перед скобкой в `= [256]` стоит пробел."""
+        answer = (
+            "Размерность задаётся так:\n\n"
+            "```python\n"
+            "dims = [256]\n"
+            "shape = [1536]\n"
+            "```\n\n"
+            "Подробности во фрагменте [1]."
+        )
+        assert cited_numbers(answer) == [1]
+        assert unknown_citations(answer, available=2) == []
+
+    def test_literal_list_inline_is_not_a_citation(self) -> None:
+        assert unknown_citations("Пишем `dims = [256]` и всё.", available=2) == []
+
+    def test_citation_glued_to_a_russian_word_counts(self) -> None:
+        """Кириллица перед скобкой — проза, а не обращение к массиву."""
+        assert cited_numbers("Хранятся в виде векторов[1], как описано выше.") == [1]
+
 
 class TestContextBudgetEdges:
     def test_fit_terminates_on_impossible_budget(self) -> None:
@@ -458,3 +478,44 @@ class TestEvaluationIsNotFooledByTheAnswerCache:
         assert first.recall == second.recall
         assert first.false_refusals == second.false_refusals == 0
         assert second.recall[max(second.recall)] == 1.0
+
+
+class TestUserTemplateInTheKey:
+    """Обёртка вокруг фрагментов — часть инструкции, а не оформление.
+
+    Заголовки и порядок блоков меняют ответ так же, как правка системного
+    промпта. Пока их отпечатка не было в ключе, кэш продолжал отдавать ответы,
+    посчитанные по прежней обёртке.
+    """
+
+    def test_template_version_follows_the_headers(self) -> None:
+        from zerocoder_assistant.generation import context_builder
+
+        before = context_builder.USER_TEMPLATE_VERSION
+        from zerocoder_assistant.preprocessing.models import content_hash
+
+        recomputed = content_hash(
+            "\x00".join(
+                [
+                    "Другой заголовок:",
+                    context_builder.QUESTION_HEADER,
+                    context_builder.BLOCK_SEPARATOR,
+                    context_builder.FRAGMENT_SEPARATOR,
+                ]
+            )
+        )
+
+        assert before != recomputed
+
+    def test_template_version_reaches_the_answer_key(
+        self, settings: Settings, store: ChromaVectorStore, prompt: Prompt
+    ) -> None:
+        from zerocoder_assistant.generation.context_builder import USER_TEMPLATE_VERSION
+
+        answerer = build_answerer(settings, store, prompt, llm=FakeLLM())
+        try:
+            params = answerer._generation_params()
+        finally:
+            answerer.close()
+
+        assert params["user_template"] == USER_TEMPLATE_VERSION

@@ -6,6 +6,7 @@ import logging
 
 from zerocoder_assistant.config.settings import Settings, get_settings
 from zerocoder_assistant.embeddings.factory import OPENAI_COMPATIBLE
+from zerocoder_assistant.errors import UnknownProviderError
 from zerocoder_assistant.llm.base import LLMProvider
 from zerocoder_assistant.llm.openai_compatible import OpenAICompatibleLLM
 
@@ -23,10 +24,9 @@ def build_llm_provider(settings: Settings | None = None) -> LLMProvider:
     credentials = settings.credentials(provider)
 
     if provider not in OPENAI_COMPATIBLE:
-        raise NotImplementedError(
-            f"Провайдер модели {provider!r} пока не реализован. "
-            f"Доступны: {', '.join(sorted(OPENAI_COMPATIBLE))}"
-        )
+        # Не NotImplementedError: для того, кто настраивает .env, это ровно
+        # то же самое, что опечатка в имени, — и показывать это надо так же.
+        raise UnknownProviderError(provider, tuple(sorted(OPENAI_COMPATIBLE)))
 
     logger.debug("LLM: %s, модель %s", provider, settings.llm_model)
     return OpenAICompatibleLLM(

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from zerocoder_assistant.cache.keys import (
     normalize_query,
     retrieval_key,
 )
-from zerocoder_assistant.cache.sqlite_cache import SqliteCache
+from zerocoder_assistant.cache.sqlite_cache import SqliteCache, _add_missing_columns
 from zerocoder_assistant.observability.counters import LevelUsage
 
 BASE = RetrievalParams(
@@ -52,8 +53,19 @@ class TestNormalizeQuery:
 
 
 class TestKeys:
-    def test_same_query_same_key(self) -> None:
-        assert retrieval_key("вопрос", BASE) == retrieval_key("вопрос", BASE)
+    def test_key_is_stable_across_runs(self) -> None:
+        """Ключ закреплён значением, а не сравнением вызова с самим собой.
+
+        Сравнить два вызова подряд — значит проверить, что функция
+        детерминирована, чего никто и не подозревал. Смысл здесь в другом:
+        формула ключа не должна меняться незаметно. Любая её правка обесценивает
+        весь накопленный кэш разом, и узнать об этом надо от упавшего теста, а
+        не от счёта за повторную векторизацию корпуса.
+
+        Если правка формулы сделана осознанно — впишите новое значение и
+        очистите кэш (`zassist cache clear`).
+        """
+        assert retrieval_key("вопрос", BASE) == "6a8454ae12679a58db0a7057a0f9b945"
 
     def test_whitespace_does_not_change_key(self) -> None:
         assert retrieval_key("вопрос  тут", BASE) == retrieval_key(" вопрос тут ", BASE)
@@ -88,8 +100,19 @@ class TestKeys:
         assert retrieval_key("вопрос", first) == retrieval_key("вопрос", second)
 
     def test_embedding_key_ignores_search_params(self) -> None:
-        """Вектор запроса от top_k не зависит — значит и ключ L1 не должен."""
-        assert embedding_key("вопрос", "модель") == embedding_key("вопрос", "модель")
+        """Вектор запроса от top_k не зависит — значит и ключ L1 не должен.
+
+        Прежняя редакция сравнивала один и тот же вызов с самим собой и
+        утверждение из докстринга не проверяла вовсе. Проверяется оно так:
+        параметры поиска меняются, ключ L2 вслед за ними уезжает, ключ L1
+        остаётся на месте.
+        """
+        other = replace(BASE, top_k=BASE.top_k + 3, relevance_threshold=0.7)
+
+        assert retrieval_key("вопрос", other) != retrieval_key("вопрос", BASE)
+        assert embedding_key("вопрос", BASE.embed_model) == embedding_key(
+            "вопрос", other.embed_model
+        )
 
     def test_embedding_key_depends_on_model(self) -> None:
         assert embedding_key("вопрос", "модель-а") != embedding_key("вопрос", "модель-б")
@@ -270,3 +293,40 @@ class TestUsageCounters:
         cache.set_answer("k", "вопрос", "отпечаток", "ответ", [])
 
         assert cache.snapshot_usage().lookups == 0
+
+
+class TestSchemaMigrationRace:
+    """Две команды разом видят нехватку колонки — вторая не должна падать.
+
+    Между `PRAGMA table_info` и `ALTER TABLE` есть окно. Попасть в него легко:
+    прогон оценки в одном терминале и `ask --repl` в другом. Файл кэша после
+    гонки в порядке, и объявлять это ошибкой команды не за что.
+    """
+
+    def test_duplicate_column_is_not_an_error(self) -> None:
+        connection = _RacingConnection("duplicate column name: top_similarity")
+
+        _add_missing_columns(connection)  # не должно поднять исключение
+
+        assert connection.altered, "ALTER всё-таки был выполнен"
+
+    def test_other_failures_still_surface(self) -> None:
+        """Испорченный файл кэша молчать не должен."""
+        connection = _RacingConnection("database disk image is malformed")
+
+        with pytest.raises(sqlite3.OperationalError, match="malformed"):
+            _add_missing_columns(connection)
+
+
+class _RacingConnection:
+    """Соединение, где колонки нет по PRAGMA, но ALTER её уже не добавляет."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.altered = False
+
+    def execute(self, statement: str) -> list[tuple[object, ...]]:
+        if statement.startswith("PRAGMA"):
+            return []
+        self.altered = True
+        raise sqlite3.OperationalError(self.message)

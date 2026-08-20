@@ -16,10 +16,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from zerocoder_assistant.errors import MissingCredentialsError
+from zerocoder_assistant.errors import (
+    ConfigurationError,
+    MissingCredentialsError,
+    UnknownProviderError,
+)
 
 #: Корень проекта: <root>/src/zerocoder_assistant/config/settings.py -> parents[3].
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
@@ -34,11 +38,19 @@ PROVIDER_FIELDS: Final[dict[str, tuple[str, str]]] = {
 
 
 class ProviderCredentials(BaseModel):
-    """Разрешённые доступы к одному провайдеру."""
+    """Разрешённые доступы к одному провайдеру.
+
+    Ключ — `SecretStr`, а не строка. Разница видна ровно тогда, когда что-то
+    пошло не так: настройки и учётные данные попадают в отладочный вывод, в
+    текст исключения, в лог по `%r`, — и обычная строка утекает туда целиком.
+    `SecretStr` печатается как `**********`, а настоящее значение достаётся
+    единственным явным вызовом `get_secret_value()`, который легко найти
+    поиском.
+    """
 
     model_config = {"frozen": True}
 
-    api_key: str
+    api_key: SecretStr
     base_url: str
 
 
@@ -87,9 +99,9 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     embed_provider: str = "openai"
 
-    openai_api_key: str | None = None
+    openai_api_key: SecretStr | None = None
     openai_base_url: str = "https://api.openai.com/v1"
-    proxyapi_api_key: str | None = None
+    proxyapi_api_key: SecretStr | None = None
     proxyapi_base_url: str = "https://api.proxyapi.ru/openai/v1"
 
     llm_model: str = "gpt-4o-mini"
@@ -98,9 +110,16 @@ class Settings(BaseSettings):
 
     # --- Пути ---------------------------------------------------------------
     notes_dir: Path = Path("./data/notes")
-    raw_dir: Path = Path("./data/raw")
+    # RAW_DIR здесь нет намеренно. Конвейер авторства (P1) спроектирован, но не
+    # реализован, и сырьё складывать некуда. Настройка, которая ничего не
+    # меняет, хуже её отсутствия: её выставляют и ждут последствий. Вернётся
+    # вместе с командой `notes`.
     chroma_dir: Path = Path("./storage/chroma")
     cache_db: Path = Path("./storage/cache.db")
+    #: Куда `index preview --dump-clean` выкладывает очищенные конспекты.
+    #: Внутри storage/, а значит под .gitignore: это тексты уроков, и в
+    #: публичном репозитории им не место.
+    clean_dir: Path = Path("./storage/clean")
     prompts_dir: Path = Path("./prompts")
 
     embed_batch_size: int = Field(default=64, ge=1, le=2048)
@@ -134,10 +153,16 @@ class Settings(BaseSettings):
     # C системного промпта, 8 из 8 вопросов, которые до неё дошли; на остальных
     # трёх модель не вызывалась вовсе). Поэтому значение выбрано у нижней
     # границы: 0.30 даёт recall@5 88% и ни одного ложного отказа НА УРОВНЕ
-    # ПОРОГА. Сама модель при этом отказывается на 7 отвечаемых вопросах из
-    # 40 — но это её решение, а не отсечение: фрагменты порог пропустил.
+    # ПОРОГА. Сама модель при этом отказывается на 6-7 отвечаемых вопросах
+    # из 40 (разброс — от TEMPERATURE=0.2), но это её решение, а не
+    # отсечение: фрагменты порог пропустил.
     relevance_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
-    dedup_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+    # Строго больше нуля: при нуле похожими считаются ЛЮБЫЕ два фрагмента
+    # (`jaccard >= 0` истинно всегда) и от выдачи остаётся один. Значение
+    # 0.8 отсекает дословный повтор и заведомо не трогает перекрытие
+    # чанков — по замерам на корпусе соседние чанки одной секции дают
+    # сходство около 0.09, а максимум по всем парам выдачи — 0.200.
+    dedup_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
     max_context_tokens: int = Field(default=3000, ge=200)
     max_answer_tokens: int = Field(default=1000, ge=100, le=16000)
     history_pairs: int = Field(default=5, ge=0, le=50)
@@ -171,7 +196,7 @@ class Settings(BaseSettings):
 
         Иначе поведение команд зависит от того, из какой папки их запустили.
         """
-        for field in ("notes_dir", "raw_dir", "chroma_dir", "cache_db", "prompts_dir"):
+        for field in ("notes_dir", "chroma_dir", "cache_db", "prompts_dir", "clean_dir"):
             value: Path = getattr(self, field)
             if not value.is_absolute():
                 object.__setattr__(self, field, (PROJECT_ROOT / value).resolve())
@@ -188,14 +213,24 @@ class Settings(BaseSettings):
 
     @property
     def chunking(self) -> ChunkingConfig:
-        """Срез настроек, который нужен препроцессингу."""
-        return ChunkingConfig(
-            target_tokens=self.chunk_target_tokens,
-            max_tokens=self.chunk_max_tokens,
-            min_tokens=self.chunk_min_tokens,
-            overlap_pct=self.chunk_overlap_pct,
-            encoding=self.tokenizer_encoding,
-        )
+        """Срез настроек, который нужен препроцессингу.
+
+        Противоречие между CHUNK_* всплывает только здесь: сами по себе числа
+        допустимы, несовместимы они попарно. Раньше это выходило наружу
+        трассировкой pydantic прямо из `index build`.
+        """
+        try:
+            return ChunkingConfig(
+                target_tokens=self.chunk_target_tokens,
+                max_tokens=self.chunk_max_tokens,
+                min_tokens=self.chunk_min_tokens,
+                overlap_pct=self.chunk_overlap_pct,
+                encoding=self.tokenizer_encoding,
+            )
+        except ValidationError as exc:
+            raise ConfigurationError.from_validation(
+                "Параметры чанкинга несовместимы", exc
+            ) from exc
 
     def credentials(self, provider: str) -> ProviderCredentials:
         """Ключ и адрес для названного провайдера.
@@ -205,12 +240,13 @@ class Settings(BaseSettings):
         """
         fields = PROVIDER_FIELDS.get(provider.lower())
         if fields is None:
-            supported = ", ".join(sorted(PROVIDER_FIELDS))
-            raise ValueError(f"Неизвестный провайдер {provider!r}. Поддерживаются: {supported}")
+            raise UnknownProviderError(provider, tuple(sorted(PROVIDER_FIELDS)))
 
         key_field, url_field = fields
-        api_key: str | None = getattr(self, key_field)
-        if not api_key:
+        api_key: SecretStr | None = getattr(self, key_field)
+        # Пустая строка в .env — самая частая форма «ключ забыли вписать»,
+        # и для SecretStr она непустой объект: проверять надо содержимое.
+        if api_key is None or not api_key.get_secret_value():
             raise MissingCredentialsError(provider=provider, env_var=key_field.upper())
 
         return ProviderCredentials(api_key=api_key, base_url=getattr(self, url_field))
@@ -218,5 +254,13 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Настройки процесса (создаются один раз)."""
-    return Settings()
+    """Настройки процесса (создаются один раз).
+
+    Единственная точка, где настройки читаются из окружения, — и потому
+    единственное место, где ошибку в .env ещё можно объяснить человеку.
+    Прямой вызов `Settings()` (в тестах) исключение pydantic не прячет.
+    """
+    try:
+        return Settings()
+    except ValidationError as exc:
+        raise ConfigurationError.from_validation("Настройки в .env недопустимы", exc) from exc

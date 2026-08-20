@@ -33,6 +33,7 @@ from zerocoder_assistant.cache.keys import answer_key
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
 from zerocoder_assistant.config.settings import Settings, get_settings
 from zerocoder_assistant.generation.context_builder import (
+    USER_TEMPLATE_VERSION,
     ContextBuilder,
     render_user_message,
     unknown_citations,
@@ -260,6 +261,8 @@ class Answerer:
             "tokenizer_encoding": self._settings.tokenizer_encoding,
             "prompt": self._prompt.name,
             "prompt_version": self._prompt.version,
+            # Обёртка вокруг фрагментов и вопроса — тоже часть инструкции.
+            "user_template": USER_TEMPLATE_VERSION,
         }
 
     def _params_label(self) -> str:

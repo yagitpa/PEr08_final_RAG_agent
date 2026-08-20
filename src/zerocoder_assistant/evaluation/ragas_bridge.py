@@ -196,7 +196,7 @@ def evaluate_with_ragas(
     # RAGAS роняло мост на разборе его же вывода.
     environment = {
         **os.environ,
-        "OPENAI_API_KEY": credentials.api_key,
+        "OPENAI_API_KEY": credentials.api_key.get_secret_value(),
         "PYTHONIOENCODING": "utf-8",
     }
 

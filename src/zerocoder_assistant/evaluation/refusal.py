@@ -5,30 +5,103 @@
 целиком, а на смежной теме фрагменты находятся с высоким сходством, и отказать
 может лишь сама модель. Проверить это можно, только заглянув в текст.
 
-Правило требует **двух** признаков в одном предложении: упоминания границ базы
-знаний и отрицания. Проверка по одному слову («в конспектах») не работает —
-системный промпт сам велит модели употреблять этот оборот в утвердительном
-ответе, и метрика начинает засчитывать галлюцинацию как отказ.
+Правило двойное, и обе половины появились после того, как метрика соврала.
+
+**Два признака рядом, а не по отдельности.** Проверка по одному слову
+(«в конспектах») была нефальсифицируемой: системный промпт сам велит модели
+употреблять этот оборот в утвердительном ответе. Нужны и упоминание границ
+базы, и отрицание.
+
+**До первого утверждения по существу.** Проверка «хотя бы одно предложение»
+засчитывала отказом ветку B — ответ по существу, обязанный закончиться
+оговоркой о том, чего в конспектах не нашлось. Такой ответ утверждает и
+оговаривается одновременно, и считать его отказом значит снимать флаг
+галлюцинации с уверенно выдуманного текста.
+
+Границей служит первая ссылка `[N]`: она означает, что ответ уже начал
+утверждать. Отказ ветки C стоит до неё («В конспектах этого нет. Рядом лежит
+кэширование [1]»), оговорка ветки B — после («Размер задаётся параметром
+`CHUNK_TARGET_TOKENS` [1]. Чем обосновано именно 400 — не сказано»). Номер
+предложения для этого не годится: отказ бывает и во втором предложении,
+если первое ничего не утверждало.
+
+Цена решения: отказ, приставленный после утверждения со ссылкой, не
+засчитается. Это недоучёт, а не переучёт, — то есть ошибка в ту сторону, в
+какую метрике и положено ошибаться, раз она объявлена оценкой снизу.
+
+Признак остаётся приблизительным: он ловит формулировку, а не смысл. Судить
+моделью было бы точнее, но тогда метрика качества зависела бы от модели,
+которую ею же и меряют.
 """
 
 from __future__ import annotations
 
-from zerocoder_assistant.config.constants import REFUSAL_NEGATIONS, REFUSAL_SCOPE_WORDS
+import re
+
+from zerocoder_assistant.config.constants import (
+    REFUSAL_NEGATION_WORDS,
+    REFUSAL_NEGATIONS,
+    REFUSAL_SCOPE_WORDS,
+)
+from zerocoder_assistant.generation.context_builder import CITATION_PATTERN
 from zerocoder_assistant.preprocessing.markdown import split_sentences
 
 
+def _stem(word: str) -> str:
+    """Основа как фрагмент регулярного выражения; пробел — любой пропуск."""
+    return r"\s+".join(re.escape(part) for part in word.split())
+
+
+def _starts_with_any(words: tuple[str, ...]) -> str:
+    return r"\b(?:" + "|".join(_stem(word) for word in words) + ")"
+
+
+#: Совпадение с НАЧАЛА слова: иначе «нет» находится внутри «кабинет».
+SCOPE_PATTERN = re.compile(_starts_with_any(REFUSAL_SCOPE_WORDS), re.IGNORECASE)
+
+#: Отрицания-основы (начало слова) плюс отрицания-слова целиком.
+NEGATION_PATTERN = re.compile(
+    _starts_with_any(REFUSAL_NEGATIONS)
+    + r"|\b(?:"
+    + "|".join(_stem(word) for word in REFUSAL_NEGATION_WORDS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
 def looks_like_refusal(text: str) -> bool:
-    """Сказано ли в ответе, что нужного в базе знаний нет.
+    """Отказался ли ответ раньше, чем начал утверждать по существу."""
+    for sentence in split_sentences(text):
+        citation = CITATION_PATTERN.search(sentence)
+        refusal_at = refusal_position(sentence)
+        if refusal_at is not None and (citation is None or refusal_at < citation.start()):
+            return True
+        if citation is not None:
+            # Пошли утверждения со ссылками — дальше идёт ветка B, а её
+            # оговорка про пробел отказом не является.
+            return False
+    return False
 
-    Предложение — правильная единица проверки. «В конспектах есть [1], но
-    порядок шагов не описан» и «в конспектах этого нет» отличаются не набором
-    слов, а тем, стоят ли отрицание и упоминание базы рядом.
+
+def refusal_position(sentence: str) -> int | None:
+    """Где в предложении складывается отказ, или None, если не складывается.
+
+    Позиция нужна из-за составных предложений: «...используются для хранения
+    векторов [1], хотя в конспектах это не указано» несёт и утверждение со
+    ссылкой, и оговорку. Считать такое отказом нельзя — утверждение уже
+    сделано. Поэтому сравнивается порядок: отказ засчитывается, только если
+    он сложился ДО первой ссылки.
+
+    Отказ считается сложившимся по последнему из двух признаков: пока не
+    встретились оба, предложение ещё ни о чём не говорит.
     """
-    return any(_is_refusing(sentence) for sentence in split_sentences(text))
+    scope = SCOPE_PATTERN.search(sentence)
+    negation = NEGATION_PATTERN.search(sentence)
+    if scope is None or negation is None:
+        return None
+    return max(scope.start(), negation.start())
 
 
-def _is_refusing(sentence: str) -> bool:
-    lowered = sentence.lower()
-    return any(word in lowered for word in REFUSAL_SCOPE_WORDS) and any(
-        negation in lowered for negation in REFUSAL_NEGATIONS
-    )
+def is_refusing_sentence(sentence: str) -> bool:
+    """Стоят ли в одном предложении упоминание границ базы и отрицание."""
+    return refusal_position(sentence) is not None

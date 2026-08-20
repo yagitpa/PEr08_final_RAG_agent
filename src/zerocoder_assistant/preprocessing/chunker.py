@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from zerocoder_assistant.config.constants import HEADING_PATH_SEPARATOR
 from zerocoder_assistant.config.settings import ChunkingConfig
@@ -27,7 +27,6 @@ from zerocoder_assistant.preprocessing.models import (
     Chunk,
     NoteMetadata,
     Section,
-    content_hash,
 )
 from zerocoder_assistant.preprocessing.tokenization import TokenCounter, get_token_counter
 
@@ -264,7 +263,7 @@ class Chunker:
         text = f"{header}{BODY_SEPARATOR}{body}" if header else body
         code_ratio = draft.code_chars / len(body) if body else 0.0
 
-        return Chunk(
+        chunk = Chunk(
             chunk_id=f"{note.source_file}:s{ordinal:03d}:c{index:02d}",
             text=text,
             note=note,
@@ -274,5 +273,8 @@ class Chunker:
             chunks_in_section=total,
             content_type=classify_content_type(section_title, body, code_ratio),
             token_count=self._counter.count(text),
-            hash=content_hash(text),
+            hash="",
         )
+        # Отпечаток считается по готовому чанку: он должен покрывать ровно то,
+        # что уедет в хранилище, а это известно только после сборки паспорта.
+        return replace(chunk, hash=chunk.fingerprint())

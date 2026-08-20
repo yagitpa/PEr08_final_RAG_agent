@@ -15,6 +15,7 @@ from fakes import FakeEmbedder, FakeLLM
 
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
 from zerocoder_assistant.config.settings import Settings
+from zerocoder_assistant.evaluation import Evaluator, GoldenQuestion, GoldenSet
 from zerocoder_assistant.generation import (
     NO_CONTEXT_ANSWER,
     Answerer,
@@ -410,3 +411,50 @@ class TestSourcesMatchContext:
 
         assert answer.dropped_fragments > 0
         assert len(answer.sources) == answer.used_fragments
+
+
+class TestEvaluationIsNotFooledByTheAnswerCache:
+    """Повторный прогон оценки обязан давать тот же отчёт, что и первый.
+
+    Кэш L3 хранит текст ответа и список источников, но не сами фрагменты.
+    Пока оценка им пользовалась, попадание возвращало ответ без выдачи поиска,
+    и отчёт печатал recall 0 и ложный отказ по каждому закэшированному вопросу.
+    Отличить это от настоящей поломки по отчёту было нельзя: латентность
+    честно падала, доля попаданий в кэш честно росла.
+    """
+
+    def _golden(self) -> GoldenSet:
+        return GoldenSet(
+            version=1,
+            questions=(
+                GoldenQuestion(
+                    id="q1",
+                    question="кэширование запросов",
+                    lessons=("PEr08",),
+                    answerable=True,
+                ),
+            ),
+        )
+
+    def test_second_run_repeats_the_first(
+        self,
+        settings: Settings,
+        store: ChromaVectorStore,
+        prompt: Prompt,
+        tmp_path: Path,
+    ) -> None:
+        cache = SqliteCache(tmp_path / "eval-cache.db")
+        golden = self._golden()
+
+        def once() -> object:
+            llm = FakeLLM("Кэш работает так [1].")
+            answerer = build_answerer(settings, store, prompt, llm=llm, cache=cache)
+            retriever = Retriever(settings, embedder=FakeEmbedder(), store=store, cache=cache)
+            with Evaluator(settings, retriever=retriever, cache=cache) as evaluator:
+                return evaluator.run(golden, answerer=answerer)
+
+        first, second = once(), once()
+
+        assert first.recall == second.recall
+        assert first.false_refusals == second.false_refusals == 0
+        assert second.recall[max(second.recall)] == 1.0

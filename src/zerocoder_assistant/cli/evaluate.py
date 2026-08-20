@@ -95,7 +95,7 @@ def run(
             finally:
                 if answerer is not None:
                     answerer.close()
-    except AssistantError as exc:
+    except (AssistantError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(render_evaluation(report))

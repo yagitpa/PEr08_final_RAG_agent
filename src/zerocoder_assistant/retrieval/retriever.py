@@ -97,6 +97,11 @@ class RetrievalResult:
     candidates: int = 0
     below_threshold: int = 0
     duplicates: int = 0
+    #: Сходство лучшего кандидата ДО отсечения порогом. Отобранный фрагмент
+    #: по определению не бывает ниже порога, поэтому судить по нему о том,
+    #: насколько запрос вообще близок к базе, нельзя: подняв порог, всегда
+    #: получишь «высокое сходство» — просто у меньшего числа вопросов.
+    top_candidate_similarity: float | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)
 
     @property
@@ -164,11 +169,13 @@ class Retriever:
         if use_cache and self._cache is not None:
             cached = self._cache.get_retrieval(retrieval_key(query, params))
             if cached is not None:
+                hits, top_candidate = cached
                 logger.debug("Поиск: попадание в кэш L2")
                 return RetrievalResult(
                     query=query,
-                    chunks=[RetrievedChunk.from_dict(item) for item in cached],
+                    chunks=[RetrievedChunk.from_dict(item) for item in hits],
                     from_cache=True,
+                    top_candidate_similarity=top_candidate,
                     timings_ms=watch.finish(),
                 )
 
@@ -186,6 +193,7 @@ class Retriever:
                 query,
                 params.fingerprint(),
                 [chunk.as_dict() for chunk in result.chunks],
+                result.top_candidate_similarity,
             )
 
         return RetrievalResult(
@@ -194,6 +202,7 @@ class Retriever:
             candidates=result.candidates,
             below_threshold=result.below_threshold,
             duplicates=result.duplicates,
+            top_candidate_similarity=result.top_candidate_similarity,
             timings_ms=timings,
         )
 
@@ -237,6 +246,7 @@ class Retriever:
             chunks=unique,
             candidates=len(found),
             duplicates=duplicates,
+            top_candidate_similarity=max((chunk.similarity for chunk in found), default=None),
             timings_ms=watch.finish(),
         )
 
@@ -315,4 +325,5 @@ class Retriever:
             candidates=len(candidates),
             below_threshold=below,
             duplicates=duplicates,
+            top_candidate_similarity=max((chunk.similarity for chunk in candidates), default=None),
         )

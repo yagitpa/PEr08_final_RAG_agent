@@ -23,6 +23,7 @@ from zerocoder_assistant.config.constants import (
     CONTENT_TYPE_SUMMARY,
     CONTENT_TYPE_THEORY,
 )
+from zerocoder_assistant.observability.timing import STAGE_ORDER
 
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from collections.abc import Iterable, Mapping, Sequence
@@ -30,7 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
 
     from zerocoder_assistant.cache.sqlite_cache import CacheStats
     from zerocoder_assistant.config.settings import ChunkingConfig
-    from zerocoder_assistant.evaluation.metrics import EvaluationReport
+    from zerocoder_assistant.evaluation.metrics import EvaluationReport, QuestionOutcome
     from zerocoder_assistant.evaluation.runner import ThresholdPoint
     from zerocoder_assistant.generation.answerer import Answer
     from zerocoder_assistant.indexing.builder import IndexReport
@@ -455,17 +456,14 @@ def render_evaluation(report: EvaluationReport, *, failures: bool = True) -> str
         lines.append("Отказы там, где ответа нет")
         for stats in report.refusals:
             label = KIND_LABELS.get(stats.kind, stats.kind)
-            lines.append(
-                _field(
-                    f"{INDENT}{label}",
-                    f"{stats.refused}/{stats.total} ({_percent(stats.accuracy)})"
-                    + (f", придумано {stats.invented}" if stats.invented else ""),
-                )
-            )
+            value = f"{stats.refused}/{stats.total} ({_percent(stats.accuracy)})"
+            if stats.invented:
+                value += f", порог пропустил {stats.invented}"
+            lines.append(_field(f"{INDENT}{label}", value))
         lines.append(_field(f"{INDENT}всего", _percent(report.refusal_accuracy)))
 
     lines.append("")
-    lines.append("Разделимость по сходству лучшего фрагмента")
+    lines.append("Разделимость по сходству лучшего кандидата (до порога)")
     lowest = _similarity(report.min_similarity_answerable)
     highest = _similarity(report.max_similarity_unanswerable)
     lines.append(_field(f"{INDENT}минимум там, где ответ есть", lowest))
@@ -510,11 +508,19 @@ def render_evaluation(report: EvaluationReport, *, failures: bool = True) -> str
     return "\n".join(lines)
 
 
-def _failure_line(outcome) -> str:
+def _failure_line(outcome: QuestionOutcome) -> str:
+    """Строка про один неправильный исход.
+
+    Формулировка зависит от того, вызывалась ли модель. В дешёвом режиме
+    «придуман ответ» — неправда: произошло «порог пропустил фрагменты», а
+    ответа не было вовсе. Режим по умолчанию именно дешёвый, так что эту строку
+    видят чаще всего.
+    """
     question = outcome.question
     text = _truncate(question.question, 60)
     if not question.answerable:
-        return f"{question.id} придуман ответ на «{text}» ({_similarity(outcome.top_similarity)})"
+        verdict = "придуман ответ" if outcome.generated else "порог пропустил фрагменты"
+        return f"{question.id} {verdict}: «{text}» ({_similarity(outcome.top_similarity)})"
     if outcome.refused:
         return f"{question.id} отказ на «{text}», ждали {'/'.join(question.lessons)}"
     return (
@@ -605,9 +611,12 @@ def render_cache_stats(stats: CacheStats, path: Path | None = None) -> str:
 
 
 def _render_timings(timings: Mapping[str, float]) -> str:
-    order = ("embed", "search", "llm", "total")
-    known = [f"{name} {timings[name]:.0f} мс" for name in order if name in timings]
-    return " | ".join(known)
+    """Разбивка по этапам в порядке их выполнения.
+
+    Порядок берётся из `observability`, а не задаётся здесь второй раз: копия
+    уже успела разойтись с оригиналом и молча выбрасывала этап сборки контекста.
+    """
+    return " | ".join(f"{name} {timings[name]:.0f} мс" for name in STAGE_ORDER if name in timings)
 
 
 def render_chunk_sample(chunk: Chunk, *, max_chars: int = DEFAULT_SAMPLE_CHARS) -> str:

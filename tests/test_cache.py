@@ -20,6 +20,7 @@ from zerocoder_assistant.cache.keys import (
     retrieval_key,
 )
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
+from zerocoder_assistant.observability.counters import LevelUsage
 
 BASE = RetrievalParams(
     embed_model="text-embedding-3-small",
@@ -30,6 +31,11 @@ BASE = RetrievalParams(
     filters=None,
     index_version="2026-08-19T09:56:26+00:00",
 )
+
+
+def level_usage(cache: SqliteCache, name: str) -> LevelUsage:
+    """Счётчики одного уровня кэша."""
+    return next(level for level in cache.snapshot_usage().levels if level.level == name)
 
 
 class TestNormalizeQuery:
@@ -130,9 +136,26 @@ class TestSqliteCache:
 
     def test_retrieval_round_trip(self, cache: SqliteCache) -> None:
         hits = [{"chunk_id": "a", "text": "текст", "similarity": 0.5, "metadata": {"x": 1}}]
-        cache.set_retrieval("k", "вопрос", "отпечаток", hits)
+        cache.set_retrieval("k", "вопрос", "отпечаток", hits, 0.71)
 
-        assert cache.get_retrieval("k") == hits
+        assert cache.get_retrieval("k") == (hits, 0.71)
+
+    def test_retrieval_keeps_best_candidate_similarity(self, cache: SqliteCache) -> None:
+        """Сходство лучшего кандидата до порога переживает кэш.
+
+        Иначе прогон оценки по горячему кэшу считал бы разделимость классов по
+        одним вопросам и не считал бы по другим — в зависимости от того, что
+        успело закэшироваться.
+        """
+        cache.set_retrieval("k", "вопрос", "отпечаток", [], 0.88)
+
+        assert cache.get_retrieval("k") == ([], 0.88)
+
+    def test_retrieval_written_by_older_version_still_reads(self, cache: SqliteCache) -> None:
+        """У старых записей колонки не было — это None, а не падение."""
+        cache.set_retrieval("k", "вопрос", "отпечаток", [])
+
+        assert cache.get_retrieval("k") == ([], None)
 
     def test_answer_round_trip(self, cache: SqliteCache) -> None:
         cache.set_answer("k", "вопрос", "отпечаток", "ответ", ["PEr07 > Кеширование"])
@@ -186,3 +209,64 @@ class TestSqliteCache:
         SqliteCache(path).set_answer("k", "q", "p", "ответ", [])
 
         assert SqliteCache(path).get_answer("k")[0] == "ответ"
+
+
+class TestUsageCounters:
+    """Проводка счётчиков в сам кэш, а не логика счёта.
+
+    `UsageCounters` проверен отдельно, но его подключение к трём геттерам — нет,
+    и мутации, снимавшие любую из трёх проводок, проходили весь набор тестов.
+    Ни одна цифра `cache usage` при этом не была ничем подкреплена.
+    """
+
+    @pytest.fixture
+    def cache(self, tmp_path: Path) -> SqliteCache:
+        return SqliteCache(tmp_path / "cache.db")
+
+    def test_embedding_lookup_is_counted(self, cache: SqliteCache) -> None:
+        cache.get_embedding("нет")
+        cache.set_embedding("есть", "вопрос", "модель", [0.1, 0.2])
+        cache.get_embedding("есть")
+
+        level = level_usage(cache, "embeddings")
+
+        assert (level.hits, level.misses) == (1, 1)
+
+    def test_retrieval_lookup_is_counted(self, cache: SqliteCache) -> None:
+        cache.get_retrieval("нет")
+        cache.set_retrieval("есть", "вопрос", "отпечаток", [])
+        cache.get_retrieval("есть")
+
+        level = level_usage(cache, "retrieval")
+
+        assert (level.hits, level.misses) == (1, 1)
+
+    def test_answer_lookup_is_counted(self, cache: SqliteCache) -> None:
+        cache.get_answer("нет")
+        cache.set_answer("есть", "вопрос", "отпечаток", "ответ", [])
+        cache.get_answer("есть")
+
+        level = level_usage(cache, "answers")
+
+        assert (level.hits, level.misses) == (1, 1)
+
+    def test_levels_are_counted_separately(self, cache: SqliteCache) -> None:
+        """Промах на одном уровне не портит долю попаданий на другом."""
+        cache.set_embedding("k", "вопрос", "модель", [1.0])
+        cache.get_embedding("k")
+        cache.get_answer("k")
+
+        usage = cache.snapshot_usage()
+        by_level = {level.level: level for level in usage.levels}
+
+        assert by_level["embeddings"].hit_rate == 1.0
+        assert by_level["answers"].hit_rate == 0.0
+        assert by_level["retrieval"].lookups == 0
+        assert usage.hit_rate == 0.5
+
+    def test_writes_are_not_lookups(self, cache: SqliteCache) -> None:
+        """Запись — не обращение: иначе доля попаданий падала бы от наполнения."""
+        cache.set_embedding("k", "вопрос", "модель", [1.0])
+        cache.set_answer("k", "вопрос", "отпечаток", "ответ", [])
+
+        assert cache.snapshot_usage().lookups == 0

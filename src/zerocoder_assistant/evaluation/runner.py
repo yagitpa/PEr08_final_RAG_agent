@@ -85,12 +85,27 @@ class Evaluator:
     ) -> None:
         self._settings = settings or get_settings()
         self._cache = cache
-        self._retriever = retriever or Retriever(self._settings, cache=cache)
-        self._owns_retriever = retriever is None
+        self._given_retriever = retriever
+        self._own_retriever: Retriever | None = None
+
+    @property
+    def retriever(self) -> Retriever:
+        """Поиск создаётся при первом обращении.
+
+        В режиме `--answers` работает поиск внутри генератора, а собственный не
+        нужен вовсе: создавать провайдер эмбеддингов и второй клиент Chroma на
+        тот же каталог ради неиспользуемого объекта незачем.
+        """
+        if self._given_retriever is not None:
+            return self._given_retriever
+        if self._own_retriever is None:
+            self._own_retriever = Retriever(self._settings, cache=self._cache)
+        return self._own_retriever
 
     def close(self) -> None:
-        if self._owns_retriever:
-            self._retriever.close()
+        if self._own_retriever is not None:
+            self._own_retriever.close()
+            self._own_retriever = None
 
     def __enter__(self) -> Evaluator:
         return self
@@ -136,19 +151,26 @@ class Evaluator:
         watch = Stopwatch()
 
         if answerer is None:
-            result = self._retriever.retrieve(
+            result = self.retriever.retrieve(
                 question.question, top_k=top_k, where=where, use_cache=use_cache
             )
-            chunks, answer, invented = result.chunks, None, ()
+            chunks, answer, invented, generated = result.chunks, None, (), False
             from_cache = result.from_cache
+            best = result.top_candidate_similarity
         else:
             reply = answerer.answer(
                 question.question, top_k=top_k, where=where, use_cache=use_cache
             )
-            chunks = reply.retrieval.chunks if reply.retrieval else []
+            retrieval = reply.retrieval
+            chunks = retrieval.chunks if retrieval else []
             answer = reply.text
             invented = tuple(reply.unknown_citations)
             from_cache = reply.from_cache
+            # `grounded` ложно ровно тогда, когда выдача пуста и модель не
+            # вызывалась: подставленный текст отказа не должен засчитываться
+            # второму рубежу как его работа.
+            generated = reply.grounded
+            best = retrieval.top_candidate_similarity if retrieval else None
 
         return QuestionOutcome(
             question=question,
@@ -157,7 +179,9 @@ class Evaluator:
             latency_ms=watch.finish()["total"],
             from_cache=from_cache,
             answer=answer,
+            generated=generated,
             unknown_citations=invented,
+            best_similarity=best,
         )
 
     # -- подбор порога -------------------------------------------------------
@@ -167,12 +191,15 @@ class Evaluator:
         golden: GoldenSet,
         *,
         top_k: int | None = None,
+        where: dict[str, Any] | None = None,
         use_cache: bool = True,
     ) -> dict[str, list[Candidate]]:
         """Сходства всех найденных фрагментов по каждому вопросу, без порога."""
         collected: dict[str, list[Candidate]] = {}
         for question in _progress(golden.questions):
-            result = self._retriever.candidates(question.question, top_k=top_k, use_cache=use_cache)
+            result = self.retriever.candidates(
+                question.question, top_k=top_k, where=where, use_cache=use_cache
+            )
             collected[question.id] = [
                 Candidate(similarity=chunk.similarity, lesson=lesson)
                 for chunk, lesson in zip(result.chunks, lessons_of(result.chunks), strict=True)
@@ -185,17 +212,20 @@ class Evaluator:
         thresholds: Sequence[float],
         *,
         top_k: int | None = None,
+        where: dict[str, Any] | None = None,
         use_cache: bool = True,
     ) -> list[ThresholdPoint]:
         """Каким был бы прогон при каждом из значений порога.
 
-        Дедупликация здесь считается один раз, на полном списке кандидатов, а в
-        рабочем конвейере — уже после отсечения. На высоких порогах это может
-        разойтись на единичный фрагмент, поэтому подобранное значение стоит
-        подтвердить обычным прогоном.
+        Порядок операций сохраняется точно, а не приблизительно. Хранилище
+        отдаёт кандидатов по убыванию сходства, дедупликация — жадный проход
+        слева направо, оставляющий более похожего представителя группы. Значит
+        отсечение по порогу — это взятие префикса, а дедупликация префикса
+        совпадает с префиксом дедупликации. Настоящая предпосылка здесь —
+        отсортированность выдачи; на неотсортированном входе тождество ломается.
         """
         limit = top_k or self._settings.top_k
-        collected = self.collect_candidates(golden, top_k=top_k, use_cache=use_cache)
+        collected = self.collect_candidates(golden, top_k=top_k, where=where, use_cache=use_cache)
 
         points = []
         for threshold in thresholds:
@@ -217,6 +247,9 @@ def _simulate(
         lessons=tuple(candidate.lesson for candidate in selected),
         similarities=tuple(candidate.similarity for candidate in selected),
         latency_ms=0.0,
+        # Лучший кандидат берётся ДО отсечения — иначе разделимость классов
+        # менялась бы вместе с порогом, который она же и оценивает.
+        best_similarity=max((candidate.similarity for candidate in candidates), default=None),
     )
 
 
@@ -228,7 +261,11 @@ def thresholds_range(start: float, stop: float, step: float) -> list[float]:
     """
     if step <= 0:
         raise ValueError("Шаг перебора должен быть положительным")
-    count = round((stop - start) / step)
+    if stop < start:
+        raise ValueError(f"Верхняя граница перебора ({stop}) ниже нижней ({start})")
+    # Округление вниз, а не к ближайшему: при round() остаток больше полушага
+    # давал точку ВЫШЕ stop, хотя докстринг обещает диапазон включительно.
+    count = int((stop - start) / step + 1e-9)
     return [round(start + step * index, 4) for index in range(count + 1)]
 
 

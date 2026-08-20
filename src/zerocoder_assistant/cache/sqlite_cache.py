@@ -55,11 +55,12 @@ CREATE TABLE IF NOT EXISTS query_embeddings (
 );
 
 CREATE TABLE IF NOT EXISTS retrievals (
-    key        TEXT PRIMARY KEY,
-    query      TEXT NOT NULL,
-    params     TEXT NOT NULL,
-    hits       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    key           TEXT PRIMARY KEY,
+    query         TEXT NOT NULL,
+    params        TEXT NOT NULL,
+    hits          TEXT NOT NULL,
+    top_candidate REAL,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS answers (
@@ -73,6 +74,11 @@ CREATE TABLE IF NOT EXISTS answers (
 """
 
 _TABLES = ("query_embeddings", "retrievals", "answers")
+
+#: Колонки, добавленные после первой версии схемы. Кэш переживает обновление
+#: кода, и запись без сходства лучшего кандидата — не повод его сбрасывать:
+#: недостающее значение просто вернётся как None.
+_ADDED_COLUMNS = (("retrievals", "top_candidate", "REAL"),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,7 @@ class SqliteCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(SCHEMA)
+            _add_missing_columns(connection)
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -127,18 +134,37 @@ class SqliteCache:
 
     # -- L2: результаты поиска --------------------------------------------
 
-    def get_retrieval(self, key: str) -> list[dict[str, Any]] | None:
-        row = self._fetch("SELECT hits FROM retrievals WHERE key = ?", key)
+    def get_retrieval(self, key: str) -> tuple[list[dict[str, Any]], float | None] | None:
+        """Фрагменты и сходство лучшего кандидата до отсечения порогом.
+
+        Второе значение нужно оценке: судить о близости запроса к базе по
+        отобранным фрагментам нельзя, они по определению не бывают ниже порога.
+        У записей, сделанных прежней версией, его нет — тогда None.
+        """
+        row = self._fetch("SELECT hits, top_candidate FROM retrievals WHERE key = ?", key)
         self.usage.record(LEVEL_RETRIEVAL, hit=row is not None)
-        return json.loads(row[0]) if row else None
+        return (json.loads(row[0]), row[1]) if row else None
 
     def set_retrieval(
-        self, key: str, query: str, params: str, hits: Sequence[dict[str, Any]]
+        self,
+        key: str,
+        query: str,
+        params: str,
+        hits: Sequence[dict[str, Any]],
+        top_candidate: float | None = None,
     ) -> None:
         self._write(
-            "INSERT OR REPLACE INTO retrievals (key, query, params, hits, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (key, query, params, json.dumps(list(hits), ensure_ascii=False), _now()),
+            "INSERT OR REPLACE INTO retrievals"
+            " (key, query, params, hits, top_candidate, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                key,
+                query,
+                params,
+                json.dumps(list(hits), ensure_ascii=False),
+                top_candidate,
+                _now(),
+            ),
         )
 
     # -- L3: готовые ответы ------------------------------------------------
@@ -215,6 +241,15 @@ def _resolve_table(level: str) -> str:
     if table is None:
         raise ValueError(f"Неизвестный уровень кэша {level!r}. Доступны: {', '.join(LEVEL_TABLES)}")
     return table
+
+
+def _add_missing_columns(connection: sqlite3.Connection) -> None:
+    """Дописать колонки, появившиеся после создания файла кэша."""
+    for table, column, kind in _ADDED_COLUMNS:
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            logger.info("Кэш: добавляю колонку %s.%s", table, column)
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 def _now() -> str:

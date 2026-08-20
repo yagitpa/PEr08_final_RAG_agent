@@ -50,14 +50,20 @@ class GoldenQuestion:
     note: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], position: int) -> GoldenQuestion:
-        where = data.get("id") or f"вопрос №{position}"
+    def from_dict(cls, data: Any, position: int) -> GoldenQuestion:
+        if not isinstance(data, dict):
+            raise GoldenSetError(
+                f"вопрос №{position}: ожидается словарь, получено {type(data).__name__}"
+            )
+
+        identifier = data.get("id")
+        where = f"{identifier}" if identifier is not None else f"вопрос №{position}"
         question = str(data.get("question", "")).strip()
         if not question:
             raise GoldenSetError(f"{where}: пустой текст вопроса")
 
-        answerable = bool(data.get("answerable", True))
-        lessons = tuple(str(lesson) for lesson in data.get("lessons") or ())
+        answerable = _as_bool(data.get("answerable", True), where=where, field="answerable")
+        lessons = _as_lessons(data.get("lessons"), where=where)
         kind = data.get("kind")
 
         if answerable and not lessons:
@@ -74,7 +80,7 @@ class GoldenQuestion:
             )
 
         return cls(
-            id=str(data.get("id") or f"q{position:03d}"),
+            id=str(identifier) if identifier is not None else f"q{position:03d}",
             question=question,
             lessons=lessons,
             answerable=answerable,
@@ -131,6 +137,35 @@ class GoldenSet:
             raise GoldenSetError(f"{path}: повторяющиеся id: {', '.join(sorted(duplicates))}")
 
         return cls(version=int(data.get("version", 1)), questions=questions, path=path)
+
+
+def _as_bool(value: Any, *, where: str, field: str) -> bool:
+    """Строгий разбор булева поля.
+
+    `bool("no")` истинно, и `answerable: no` в кавычках молча превращал
+    неотвечаемый вопрос в отвечаемый — то есть тихо портил метрику, ничего не
+    сломав. Набор — измерительный прибор, догадки здесь недопустимы.
+    """
+    if isinstance(value, bool):
+        return value
+    raise GoldenSetError(f"{where}: поле {field} должно быть true или false, получено {value!r}")
+
+
+def _as_lessons(value: Any, *, where: str) -> tuple[str, ...]:
+    """Список уроков.
+
+    Скаляр запрещён: `lessons: PEr01` вместо `lessons: [PEr01]` разбирался бы
+    построчно в кортеж символов, вопрос никогда не засчитывался бы, и recall
+    падал бы без единого сообщения.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list):
+        raise GoldenSetError(
+            f"{where}: lessons должен быть списком, получено {value!r} "
+            f"({type(value).__name__}) — используйте [{value!r}]"
+        )
+    return tuple(str(lesson) for lesson in value)
 
 
 def _duplicated_ids(questions: tuple[GoldenQuestion, ...]) -> set[str]:

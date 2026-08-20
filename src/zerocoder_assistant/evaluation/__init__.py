@@ -16,6 +16,13 @@ from zerocoder_assistant.evaluation.metrics import (
     mean_reciprocal_rank,
     recall_at,
 )
+from zerocoder_assistant.evaluation.ragas_bridge import (
+    RagasFailed,
+    RagasNotConfigured,
+    RagasReport,
+    build_dataset,
+    evaluate_with_ragas,
+)
 from zerocoder_assistant.evaluation.runner import (
     Candidate,
     Evaluator,
@@ -34,9 +41,14 @@ __all__ = [
     "GoldenSet",
     "GoldenSetError",
     "QuestionOutcome",
+    "RagasFailed",
+    "RagasNotConfigured",
+    "RagasReport",
     "RefusalStats",
     "ThresholdPoint",
+    "build_dataset",
     "build_report",
+    "evaluate_with_ragas",
     "mean_reciprocal_rank",
     "recall_at",
     "thresholds_range",

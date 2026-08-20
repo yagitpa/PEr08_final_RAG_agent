@@ -24,6 +24,7 @@ from zerocoder_assistant.evaluation.golden_set import DEFAULT_GOLDEN_SET
 from zerocoder_assistant.reporting import (
     render_cache_usage,
     render_evaluation,
+    render_ragas,
     render_threshold_sweep,
 )
 
@@ -137,6 +138,91 @@ def threshold(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(render_threshold_sweep(points, settings.relevance_threshold))
+
+
+@eval_group.command(name="ragas")
+@golden_option
+@click.option("--top-k", type=click.IntRange(min=1), default=None, help="Сколько фрагментов брать.")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    metavar="N",
+    help="Оценить только первые N вопросов: RAGAS делает несколько вызовов модели на каждый.",
+)
+@click.option(
+    "--metrics",
+    default=None,
+    metavar="СПИСОК",
+    help="Метрики через запятую; по умолчанию все безэталонные.",
+)
+@click.option("--no-cache", is_flag=True, help="Не использовать и не обновлять кэш.")
+def ragas(
+    golden_path: Path | None,
+    top_k: int | None,
+    limit: int | None,
+    metrics: str | None,
+    no_cache: bool,
+) -> None:
+    """Оценить качество ответов через RAGAS.
+
+    RAGAS живёт в отдельном окружении, потому что в общем он откатывает openai
+    до 2.x, на котором ядро не работает. Здесь собирается набор данных, дальше
+    его считает другой интерпретатор (`RAGAS_PYTHON`).
+
+    Команда сначала прогоняет golden set с вызовом модели — это стоит денег, —
+    а затем передаёт полученные ответы в RAGAS, что стоит ещё раз: судья делает
+    несколько вызовов на вопрос и на метрику. Для пробы есть `--limit`.
+    """
+    from zerocoder_assistant.cache import SqliteCache
+    from zerocoder_assistant.evaluation import Evaluator, GoldenSet
+    from zerocoder_assistant.evaluation.ragas_bridge import (
+        RagasNotConfigured,
+        build_dataset,
+        evaluate_with_ragas,
+    )
+
+    settings = get_settings()
+    cache = None if no_cache else SqliteCache(settings.cache_db)
+
+    try:
+        golden = GoldenSet.load(_resolve(golden_path))
+        with Evaluator(settings, cache=cache) as evaluator:
+            answerer = _build_answerer(settings, cache)
+            try:
+                report = evaluator.run(
+                    golden,
+                    top_k=top_k,
+                    use_cache=not no_cache,
+                    # Ответы генерируются заново: L3 хранит текст и источники,
+                    # но не фрагменты, а RAGAS сверяет ответ именно с ними.
+                    # Поиск при этом по-прежнему идёт из кэша.
+                    use_answer_cache=False,
+                    answerer=answerer,
+                )
+            finally:
+                answerer.close()
+
+        dataset = build_dataset(report.outcomes)
+        click.echo(f"Пригодно для оценки: {len(dataset)} из {report.total} вопросов")
+        click.echo("Считаю метрики, это займёт несколько минут...\n")
+
+        scores = evaluate_with_ragas(
+            settings,
+            dataset,
+            metrics=[name.strip() for name in metrics.split(",")] if metrics else None,
+            limit=limit,
+        )
+    except RagasNotConfigured as exc:
+        # Ненастроенная необязательная оценка — не провал команды. Иначе её
+        # перестают запускать вместе со всем остальным, а этого RAGAS и так
+        # добивается своей ломкостью.
+        click.echo(f"Оценка через RAGAS пропущена.\n\n{exc}")
+        return
+    except (AssistantError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(render_ragas(scores))
 
 
 def _resolve(path: Path | None) -> Path:

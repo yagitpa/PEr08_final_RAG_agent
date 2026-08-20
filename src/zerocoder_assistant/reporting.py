@@ -32,6 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
     from zerocoder_assistant.cache.sqlite_cache import CacheStats
     from zerocoder_assistant.config.settings import ChunkingConfig
     from zerocoder_assistant.evaluation.metrics import EvaluationReport, QuestionOutcome
+    from zerocoder_assistant.evaluation.ragas_bridge import RagasReport
     from zerocoder_assistant.evaluation.runner import ThresholdPoint
     from zerocoder_assistant.generation.answerer import Answer
     from zerocoder_assistant.indexing.builder import IndexReport
@@ -577,6 +578,55 @@ def render_cache_usage(usage: CacheUsage) -> str:
             )
         )
     lines.append(_field("Всего", f"{usage.hits}/{usage.lookups} ({_percent(usage.hit_rate)})"))
+    return "\n".join(lines)
+
+
+#: Человеческие подписи метрик RAGAS. Английские имена оставлены в скобках:
+#: именно они печатаются самой библиотекой и ищутся в её документации.
+RAGAS_LABELS: Final[dict[str, str]] = {
+    "faithfulness": "следует из фрагментов (faithfulness)",
+    "answer_relevancy": "отвечает на вопрос (answer_relevancy)",
+    "context_precision": "контекст по делу (context_precision)",
+}
+
+#: Порог, выше которого конспект PEr06 считает качество хорошим.
+RAGAS_GOOD_ENOUGH: Final[float] = 0.7
+
+
+def render_ragas(report: RagasReport) -> str:
+    """Метрики RAGAS.
+
+    Рядом с каждым средним печатается, на скольких вопросах оно посчитано.
+    Без этого числа среднее нечитаемо: RAGAS возвращает NaN, когда судья не
+    смог разобрать ответ, такие вопросы выпадают из подсчёта молча, и среднее
+    по трём вопросам выглядит точно так же, как среднее по сорока.
+    """
+    lines = [
+        "Метрики RAGAS",
+        _field(f"{INDENT}вопросов", report.questions),
+        _field(f"{INDENT}судья", report.model),
+        "",
+    ]
+    for metric in report.metrics:
+        label = RAGAS_LABELS.get(metric.name, metric.name)
+        if metric.mean is None:
+            lines.append(_field(f"{INDENT}{label}", "не посчитана"))
+            continue
+        note = "" if metric.counted == report.questions else f", посчитано на {metric.counted}"
+        verdict = " OK" if metric.mean >= RAGAS_GOOD_ENOUGH else " ниже 0.7"
+        lines.append(_field(f"{INDENT}{label}", f"{metric.mean:.3f}{verdict}{note}"))
+
+    if report.diagnosis:
+        lines.append("")
+        lines.append("Не посчиталось ничего. Причина, полученная повторным прогоном:")
+        lines.append(f"{INDENT}{report.diagnosis}")
+
+    lines.append("")
+    lines.append("Эталонных ответов у набора нет, поэтому context_recall не считается, а точность")
+    lines.append("контекста взята в безэталонном варианте. Отказы в оценку не входят: faithfulness")
+    lines.append(
+        "спрашивает, следует ли ответ из фрагментов, а отказ из них не следует по замыслу."
+    )
     return "\n".join(lines)
 
 

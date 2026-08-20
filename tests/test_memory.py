@@ -54,6 +54,28 @@ class TestFollowUpDetection:
     def test_empty_question(self) -> None:
         assert not is_follow_up("   ")
 
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "почему модель галлюцинирует",
+            "зачем нужен порог релевантности",
+            "почему ответы такие длинные",
+        ],
+    )
+    def test_interrogative_alone_is_not_a_reference(self, question: str) -> None:
+        """«Почему» и «зачем» — вопросительные слова, а не отсылки к сказанному.
+
+        Пока они стояли в списке маркеров, самодостаточный вопрос про
+        галлюцинации тянул в поисковый запрос предыдущую реплику и уводил
+        выдачу от того, что спросили сейчас.
+        """
+        assert not is_follow_up(question)
+
+    @pytest.mark.parametrize("question", ["зачем?", "почему", "подробнее?", "а дальше?"])
+    def test_two_words_have_nothing_to_search_by(self, question: str) -> None:
+        """В таком вопросе нет ни одного предметного слова — искать нечего."""
+        assert is_follow_up(question)
+
 
 class TestSessionHistory:
     def test_starts_empty(self) -> None:

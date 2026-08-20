@@ -478,3 +478,44 @@ class TestEvaluationIsNotFooledByTheAnswerCache:
         assert first.recall == second.recall
         assert first.false_refusals == second.false_refusals == 0
         assert second.recall[max(second.recall)] == 1.0
+
+
+class TestUserTemplateInTheKey:
+    """Обёртка вокруг фрагментов — часть инструкции, а не оформление.
+
+    Заголовки и порядок блоков меняют ответ так же, как правка системного
+    промпта. Пока их отпечатка не было в ключе, кэш продолжал отдавать ответы,
+    посчитанные по прежней обёртке.
+    """
+
+    def test_template_version_follows_the_headers(self) -> None:
+        from zerocoder_assistant.generation import context_builder
+
+        before = context_builder.USER_TEMPLATE_VERSION
+        from zerocoder_assistant.preprocessing.models import content_hash
+
+        recomputed = content_hash(
+            "\x00".join(
+                [
+                    "Другой заголовок:",
+                    context_builder.QUESTION_HEADER,
+                    context_builder.BLOCK_SEPARATOR,
+                    context_builder.FRAGMENT_SEPARATOR,
+                ]
+            )
+        )
+
+        assert before != recomputed
+
+    def test_template_version_reaches_the_answer_key(
+        self, settings: Settings, store: ChromaVectorStore, prompt: Prompt
+    ) -> None:
+        from zerocoder_assistant.generation.context_builder import USER_TEMPLATE_VERSION
+
+        answerer = build_answerer(settings, store, prompt, llm=FakeLLM())
+        try:
+            params = answerer._generation_params()
+        finally:
+            answerer.close()
+
+        assert params["user_template"] == USER_TEMPLATE_VERSION

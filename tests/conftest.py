@@ -6,12 +6,27 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fakes import make_chunk
+from fakes import isolated_settings, make_chunk
 
 from zerocoder_assistant.config import get_settings
 from zerocoder_assistant.config.settings import ChunkingConfig, Settings
 from zerocoder_assistant.preprocessing import NotePreprocessor, ProcessedNote, iter_note_files
 from zerocoder_assistant.vectorstore.chroma_store import ChromaVectorStore
+
+
+@pytest.fixture(autouse=True)
+def _forget_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Снять переменные окружения, совпадающие с полями настроек.
+
+    pydantic читает конфигурацию из двух источников: файла .env и переменных
+    процесса. Отключить один и оставить второй — значит починить тесты только
+    на той машине, где вторым источником никто не пользуется.
+
+    Корпуса это не касается: путь к конспектам берётся из .env через
+    `get_settings()`, и тесты, которым нужен корпус, работают как прежде.
+    """
+    for field in Settings.model_fields:
+        monkeypatch.delenv(field.upper(), raising=False)
 
 
 @pytest.fixture(scope="session")
@@ -51,7 +66,7 @@ def settings(tmp_path: Path) -> Settings:
     Порог поднят до 0.5 против рабочих 0.33: заглушка эмбеддера даёт сходство
     ровно 1.0 или 0.0, и при таких значениях порог виден в тестах однозначно.
     """
-    return Settings(
+    return isolated_settings(
         openai_api_key="test-key",
         chroma_dir=tmp_path / "chroma",
         cache_db=tmp_path / "cache.db",

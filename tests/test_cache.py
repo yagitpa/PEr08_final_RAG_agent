@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from zerocoder_assistant.cache.keys import (
     normalize_query,
     retrieval_key,
 )
-from zerocoder_assistant.cache.sqlite_cache import SqliteCache
+from zerocoder_assistant.cache.sqlite_cache import SqliteCache, _add_missing_columns
 from zerocoder_assistant.observability.counters import LevelUsage
 
 BASE = RetrievalParams(
@@ -270,3 +271,40 @@ class TestUsageCounters:
         cache.set_answer("k", "вопрос", "отпечаток", "ответ", [])
 
         assert cache.snapshot_usage().lookups == 0
+
+
+class TestSchemaMigrationRace:
+    """Две команды разом видят нехватку колонки — вторая не должна падать.
+
+    Между `PRAGMA table_info` и `ALTER TABLE` есть окно. Попасть в него легко:
+    прогон оценки в одном терминале и `ask --repl` в другом. Файл кэша после
+    гонки в порядке, и объявлять это ошибкой команды не за что.
+    """
+
+    def test_duplicate_column_is_not_an_error(self) -> None:
+        connection = _RacingConnection("duplicate column name: top_similarity")
+
+        _add_missing_columns(connection)  # не должно поднять исключение
+
+        assert connection.altered, "ALTER всё-таки был выполнен"
+
+    def test_other_failures_still_surface(self) -> None:
+        """Испорченный файл кэша молчать не должен."""
+        connection = _RacingConnection("database disk image is malformed")
+
+        with pytest.raises(sqlite3.OperationalError, match="malformed"):
+            _add_missing_columns(connection)
+
+
+class _RacingConnection:
+    """Соединение, где колонки нет по PRAGMA, но ALTER её уже не добавляет."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.altered = False
+
+    def execute(self, statement: str) -> list[tuple[object, ...]]:
+        if statement.startswith("PRAGMA"):
+            return []
+        self.altered = True
+        raise sqlite3.OperationalError(self.message)

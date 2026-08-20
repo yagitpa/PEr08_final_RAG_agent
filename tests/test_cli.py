@@ -18,6 +18,8 @@ from zerocoder_assistant.cli.ask import ask
 from zerocoder_assistant.cli.main import main
 from zerocoder_assistant.cli.repl_commands import handle_command
 from zerocoder_assistant.config.settings import Settings
+from zerocoder_assistant.errors import ProviderRequestError
+from zerocoder_assistant.generation.answerer import Answer
 from zerocoder_assistant.memory import SessionHistory
 
 
@@ -156,3 +158,77 @@ def _valid_golden(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+class _FlakyAnswerer:
+    """Первый вопрос обрывается сетью, второй отвечает."""
+
+    def __init__(self, settings: object, cache: object = None) -> None:
+        self.calls = 0
+
+    def __enter__(self) -> _FlakyAnswerer:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def answer(self, question: str, **_: object) -> Answer:
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderRequestError("Модель gpt-4o-mini не ответила", "обрыв соединения")
+        return Answer(
+            question=question,
+            text="Ответ по фрагменту [1].",
+            sources=["PEr08 > Секция"],
+            used_fragments=1,
+        )
+
+
+class TestDialogueSurvivesProviderFailure:
+    """Обрыв связи не должен уносить память сессии.
+
+    Диалог набирает контекст постепенно, и потерять его из-за одного
+    неудачного запроса дороже, чем сам запрос: студент начинает разговор
+    заново. Настоящая ошибка в коде при этом обязана прерывать работу.
+    """
+
+    def test_repl_continues_after_a_failed_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("zerocoder_assistant.generation.Answerer", _FlakyAnswerer)
+
+        result = CliRunner().invoke(
+            ask, ["--repl", "--no-cache"], input="первый вопрос\nвторой вопрос\n/exit\n"
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Не получилось ответить" in result.output
+        assert "обрыв соединения" in result.output
+        # Главное: разговор продолжился и второй вопрос получил ответ.
+        assert "Ответ по фрагменту [1]." in result.output
+
+    def test_single_question_still_fails_the_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Разовый вопрос — это команда: сбой обязан дать ненулевой код возврата."""
+        monkeypatch.setattr("zerocoder_assistant.generation.Answerer", _FlakyAnswerer)
+
+        result = CliRunner().invoke(ask, ["вопрос", "--no-cache"])
+
+        assert result.exit_code != 0
+        assert "не ответила" in result.output
+
+
+class TestContentTypeIsChecked:
+    """Опечатка в типе давала пустую выдачу, неотличимую от «такого нет»."""
+
+    def test_typo_is_rejected_with_the_list(self) -> None:
+        result = CliRunner().invoke(ask, ["вопрос", "--content-type", "theroy"])
+
+        assert result.exit_code == 2
+        assert "theory" in result.output
+
+    def test_known_type_is_accepted(self) -> None:
+        """Проверка не должна отвергать настоящий тип."""
+        result = CliRunner().invoke(ask, ["--content-type", "theory", "--help"])
+
+        assert result.exit_code == 0

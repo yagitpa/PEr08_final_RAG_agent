@@ -9,9 +9,26 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
+from zerocoder_assistant.config.settings import Settings
 from zerocoder_assistant.llm.base import ChatMessage
 from zerocoder_assistant.preprocessing.models import Chunk, NoteMetadata, content_hash
+
+
+def isolated_settings(**overrides: Any) -> Settings:
+    """Настройки, не зависящие от машины, на которой идут тесты.
+
+    `_env_file=None` отключает чтение проектного .env. Без него тест наследовал
+    рабочую конфигурацию разработчика: с `LLM_PROVIDER=proxyapi` в .env падала
+    проверка фабрики, потому что провайдер оказывался не тем, который тест
+    задал молчанием. Такой прогон нельзя воспроизвести на другой машине —
+    а именно за этим тесты и держат.
+
+    Переменные самого окружения снимает автофикстура в conftest: pydantic
+    читает и .env, и os.environ, и закрыть надо оба входа.
+    """
+    return Settings(_env_file=None, **overrides)
 
 
 class FakeEmbedder:

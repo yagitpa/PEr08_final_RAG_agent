@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from zerocoder_assistant.preprocessing.models import content_hash
 from zerocoder_assistant.preprocessing.tokenization import TokenCounter
 
 if TYPE_CHECKING:  # pragma: no cover - только для аннотаций
@@ -147,6 +148,18 @@ class ContextBuilder:
             cut = max(1, len(block) * excess // max(1, self._counter.count(block)))
             block = block[: len(block) - cut]
         return block
+
+
+#: Отпечаток обёртки, в которой фрагменты и вопрос едут модели.
+#:
+#: Входит в ключ кэша ответов наравне с версией системного промпта. Причина та
+#: же: заголовки и порядок блоков — часть инструкции, которую видит модель, и
+#: перестановка вопроса вперёд фрагментов меняет ответ. Пока отпечатка не было,
+#: правка этих строк молча продолжала отдавать ответы, посчитанные по прежней
+#: обёртке, — ровно тот тихий обман, ради которого версия промпта и заведена.
+USER_TEMPLATE_VERSION = content_hash(
+    "\x00".join([FRAGMENTS_HEADER, QUESTION_HEADER, BLOCK_SEPARATOR, FRAGMENT_SEPARATOR])
+)
 
 
 def render_user_message(context_text: str, question: str) -> str:

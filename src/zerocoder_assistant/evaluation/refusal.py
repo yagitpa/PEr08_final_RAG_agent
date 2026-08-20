@@ -43,7 +43,7 @@ from zerocoder_assistant.config.constants import (
     REFUSAL_NEGATIONS,
     REFUSAL_SCOPE_WORDS,
 )
-from zerocoder_assistant.generation.context_builder import CITATION_PATTERN
+from zerocoder_assistant.generation.context_builder import CITATION_PATTERN, without_code
 from zerocoder_assistant.preprocessing.markdown import split_sentences
 
 
@@ -70,8 +70,13 @@ NEGATION_PATTERN = re.compile(
 
 
 def looks_like_refusal(text: str) -> bool:
-    """Отказался ли ответ раньше, чем начал утверждать по существу."""
-    for sentence in split_sentences(text):
+    """Отказался ли ответ раньше, чем начал утверждать по существу.
+
+    Листинги убираются до разбора: индексация в примере (`chunks[0]`) — не
+    ссылка на фрагмент, и принимать её за границу «пошли утверждения» значит
+    обрывать проверку на первом же куске кода.
+    """
+    for sentence in split_sentences(without_code(text)):
         citation = CITATION_PATTERN.search(sentence)
         refusal_at = refusal_position(sentence)
         if refusal_at is not None and (citation is None or refusal_at < citation.start()):

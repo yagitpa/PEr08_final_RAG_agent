@@ -25,8 +25,12 @@ from zerocoder_assistant.evaluation import (
     recall_at,
     thresholds_range,
 )
+from zerocoder_assistant.evaluation.golden_set import (
+    KIND_IN_DOMAIN_ABSENT,
+    KIND_OUT_OF_DOMAIN,
+)
 from zerocoder_assistant.evaluation.refusal import looks_like_refusal
-from zerocoder_assistant.evaluation.runner import Candidate, _simulate
+from zerocoder_assistant.evaluation.runner import Candidate, ThresholdPoint, _simulate
 from zerocoder_assistant.observability import Stopwatch, UsageCounters, percentile
 
 PROJECT_GOLDEN_SET = Path(__file__).resolve().parents[1] / DEFAULT_GOLDEN_SET
@@ -352,6 +356,49 @@ class TestThresholdSweep:
 
         assert simulated.refused
 
+    def test_score_ignores_questions_the_model_answers_for(self) -> None:
+        """Смежная тема, которую порог пропустил, — не ошибка порога.
+
+        Отказ на ней даёт ветка C системного промпта. Пока эти вопросы входили
+        в оценку, перебор требовал от порога чужой работы: единственный способ
+        отказать на смежной теме — подняться выше сходства отвечаемых вопросов.
+        """
+        report = build_report(
+            [
+                outcome(("PEr03",)),
+                outcome((), answerable=False, kind=KIND_OUT_OF_DOMAIN),
+                outcome(("PEr01",), answerable=False, kind=KIND_IN_DOMAIN_ABSENT),
+            ]
+        )
+        point = ThresholdPoint(threshold=0.3, report=report)
+
+        # Прежняя формула считала бы 2 из 3 — смежная тема шла в минус порогу.
+        assert point.score == 1.0
+        assert [item.question.kind for item in point.graded] == [None, KIND_OUT_OF_DOMAIN]
+
+    def test_score_still_punishes_a_threshold_that_cuts_the_answer(self) -> None:
+        report = build_report(
+            [
+                outcome(()),
+                outcome((), answerable=False, kind=KIND_OUT_OF_DOMAIN),
+                outcome(("PEr01",), answerable=False, kind=KIND_IN_DOMAIN_ABSENT),
+            ]
+        )
+
+        assert ThresholdPoint(threshold=0.9, report=report).score == 0.5
+
+    def test_refusal_columns_are_split_by_kind(self) -> None:
+        report = build_report(
+            [
+                outcome((), answerable=False, kind=KIND_OUT_OF_DOMAIN),
+                outcome(("PEr01",), answerable=False, kind=KIND_IN_DOMAIN_ABSENT),
+            ]
+        )
+        point = ThresholdPoint(threshold=0.3, report=report)
+
+        assert point.foreign_refused == (1, 1)
+        assert point.adjacent_refused == (0, 1)
+
 
 class TestObservability:
     def test_stopwatch_reports_stages_and_total(self) -> None:
@@ -622,6 +669,32 @@ class TestRefusalDetection:
         """Модель отказывается и своими словами, не только словами промпта."""
         assert looks_like_refusal("Такой информации у меня нет.")
         assert looks_like_refusal("В предоставленном контексте ответа не содержится.")
+
+
+class TestRefusalNextToCode:
+    """Листинг в ответе не должен работать границей «пошли утверждения».
+
+    Индексация `chunks[0]` раньше опознавалась как ссылка на фрагмент, и
+    разбор обрывался на первом же куске кода — отказ, стоящий после листинга,
+    не засчитывался.
+    """
+
+    def test_indexing_in_a_fence_does_not_end_the_scan(self) -> None:
+        answer = (
+            "Пример обращения к выдаче:\n\n"
+            "```python\n"
+            "first = chunks[0]\n"
+            "```\n\n"
+            "В конспектах о самом параметре ничего не сказано."
+        )
+        assert looks_like_refusal(answer)
+
+    def test_real_citation_still_ends_the_scan(self) -> None:
+        answer = (
+            "Размер чанка задаётся параметром CHUNK_TARGET_TOKENS [1]. "
+            "Чем обосновано именно 400, в конспектах не сказано."
+        )
+        assert not looks_like_refusal(answer)
 
 
 class TestFalseRefusal:

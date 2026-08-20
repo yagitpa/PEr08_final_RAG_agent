@@ -535,24 +535,30 @@ def render_threshold_sweep(points: Sequence[ThresholdPoint], current: float) -> 
 
     Показываются обе ошибки сразу: подняв порог, всегда можно довести отказы до
     идеала — ценой ответов на вопросы, ответ на которые есть.
+
+    Колонка «смежных» стоит отдельно от доли правильных намеренно. Эти вопросы
+    в оценку порога не входят — отказ на них даёт модель, — но видеть, чем
+    оплачен их отсев, нужно прямо здесь, в строке с recall.
     """
     if not points:
         return "(нечего показывать)"
 
     best = max(points, key=lambda point: (point.score, -abs(point.threshold - current)))
     lines = [
-        "порог   recall@k  ложных   верных    доля",
-        "                  отказов  отказов   правильных",
+        "порог   recall@k  ложных   чужих   смежных   доля",
+        "                  отказов  отказов отказов   правильных",
     ]
     for point in points:
-        report = point.report
         mark = " <- сейчас" if abs(point.threshold - current) < 1e-9 else ""
         if point is best:
             mark += " <- лучший"
+        foreign, foreign_total = point.foreign_refused
+        adjacent, adjacent_total = point.adjacent_refused
         lines.append(
             f"{point.threshold:5.2f}   {_percent(point.recall):>7}  "
-            f"{report.false_refusals:>7}  "
-            f"{sum(s.refused for s in report.refusals):>3}/{report.unanswerable:<3}  "
+            f"{point.report.false_refusals:>7}  "
+            f"{foreign:>3}/{foreign_total:<3} "
+            f"{adjacent:>3}/{adjacent_total:<3}   "
             f"{_percent(point.score):>7}{mark}"
         )
 
@@ -560,8 +566,11 @@ def render_threshold_sweep(points: Sequence[ThresholdPoint], current: float) -> 
     lines.append(
         _field("Лучший по доле правильных", f"{best.threshold:.2f} ({_percent(best.score)})")
     )
-    lines.append("Значение из настроек — компромисс: ложный отказ окончателен, а слабый")
-    lines.append("фрагмент модель отсеет сама, поэтому порог смещают вниз от максимума.")
+    lines.append("Доля считается по вопросам, исход которых решает порог: отвечаемые плюс")
+    lines.append("заведомо чужие темы. Смежные темы в неё не входят — отказ на них даёт")
+    lines.append("модель, и требовать того же от порога значит покупать отказы падением")
+    lines.append("recall. Ложный отказ при этом окончателен, а слабый фрагмент модель")
+    lines.append("отсеет сама, поэтому из равных по доле значений берут нижнее.")
     return "\n".join(lines)
 
 

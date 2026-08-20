@@ -26,7 +26,12 @@ from typing import TYPE_CHECKING, Any
 
 from zerocoder_assistant.cache.sqlite_cache import SqliteCache
 from zerocoder_assistant.config.settings import Settings, get_settings
-from zerocoder_assistant.evaluation.golden_set import GoldenQuestion, GoldenSet
+from zerocoder_assistant.evaluation.golden_set import (
+    KIND_IN_DOMAIN_ABSENT,
+    KIND_OUT_OF_DOMAIN,
+    GoldenQuestion,
+    GoldenSet,
+)
 from zerocoder_assistant.evaluation.metrics import (
     EvaluationReport,
     QuestionOutcome,
@@ -52,7 +57,19 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class ThresholdPoint:
-    """Каким был бы прогон при этом значении порога."""
+    """Каким был бы прогон при этом значении порога.
+
+    Здесь считается только то, что делает ПОРОГ. Модель в переборе не
+    участвует: гонять её полсотни раз на каждое значение слишком дорого, да и
+    незачем — сходства от порога не зависят.
+
+    Из этого следует ограничение, которое легко проглядеть. Раз модели нет,
+    любой её отказ выглядит как несостоявшийся, и вопрос, на котором отказать
+    должна была она, записывается порогу в ошибку. Так и было: перебор считал
+    неотвечаемый вопрос правильным исходом, только если порог вырезал ВСЁ, и
+    поэтому предлагал порог тем выше, чем больше в наборе смежных тем. См.
+    `score` — там это разведено.
+    """
 
     threshold: float
     report: EvaluationReport
@@ -62,15 +79,59 @@ class ThresholdPoint:
         return self.report.recall[max(self.report.recall)]
 
     @property
-    def score(self) -> float:
-        """Доля правильных исходов на всём наборе.
+    def graded(self) -> tuple[QuestionOutcome, ...]:
+        """Вопросы, исход которых решает порог, а не модель.
 
-        Отвечаемые и неотвечаемые вопросы вносятся в неё как есть, без весов:
-        как только появляется вес, «лучший порог» начинает зависеть от того,
-        какой вес выбрали, а не от данных.
+        Это отвечаемые вопросы (порог может вырезать нужный фрагмент) и
+        `out_of_domain` — заведомо чужие темы, где сходство низкое и отсечение
+        работает. `in_domain_absent` сюда не входит: по замерам смежные темы
+        находятся со сходством до 0.588, ВЫШЕ минимума у отвечаемых вопросов
+        (0.325), и никакой порог их не отделит. Их рубеж — ветка C системного
+        промпта, и на прогоне она берёт все 8 из 8.
         """
-        wrong = len(self.report.failures)
-        return (self.report.total - wrong) / self.report.total if self.report.total else 0.0
+        return tuple(
+            outcome
+            for outcome in self.report.outcomes
+            if outcome.question.answerable or outcome.question.kind == KIND_OUT_OF_DOMAIN
+        )
+
+    @property
+    def score(self) -> float:
+        """Доля правильных исходов среди тех, за которые отвечает порог.
+
+        Смежные темы исключены не для красоты числа, а потому что включать их
+        значит требовать от порога чужой работы. Требование не бесплатное:
+        отказать на смежной теме порог может, только поднявшись выше сходства
+        отвечаемых вопросов, — то есть уронив recall. Прежняя формула этот
+        размен поощряла и систематически предлагала порог выше нужного.
+
+        Веса между оставшимися классами не вводятся: как только появляется
+        вес, «лучший порог» начинает зависеть от того, какой вес выбрали.
+        """
+        graded = self.graded
+        if not graded:
+            return 0.0
+        return sum(outcome.correct for outcome in graded) / len(graded)
+
+    @property
+    def adjacent_refused(self) -> tuple[int, int]:
+        """Сколько смежных тем порог отсёк сам: (отказов, всего).
+
+        В оценку не входит, но показывается: цену подъёма порога видно только
+        рядом с recall.
+        """
+        for stats in self.report.refusals:
+            if stats.kind == KIND_IN_DOMAIN_ABSENT:
+                return stats.refused, stats.total
+        return 0, 0
+
+    @property
+    def foreign_refused(self) -> tuple[int, int]:
+        """Сколько заведомо чужих вопросов порог отсёк: (отказов, всего)."""
+        for stats in self.report.refusals:
+            if stats.kind == KIND_OUT_OF_DOMAIN:
+                return stats.refused, stats.total
+        return 0, 0
 
 
 class Evaluator:

@@ -10,12 +10,14 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 from zerocoder_assistant.config.settings import ChunkingConfig
 from zerocoder_assistant.preprocessing import NotePreprocessor, ProcessedNote
 from zerocoder_assistant.preprocessing.headings import is_excluded_section, normalize_for_match
 from zerocoder_assistant.reporting import build_corpus_stats
+from zerocoder_assistant.retrieval.dedup import jaccard, shingles
 
 #: Доля чанков вне коридора размеров, выше которой чанкинг считается разлаженным.
 #: Не ноль: короткие секции корпуса и атомарные листинги выходят за границы
@@ -108,6 +110,55 @@ class TestSectionFiltering:
         texts = [chunk.text for chunk in all_chunks(corpus)]
 
         assert any("rag.py" in text and "ядро нашей системы" in text for text in texts)
+
+
+class TestDeduplicationThreshold:
+    """Порог дедупликации проверяется по корпусу, а не по конструкции из теста.
+
+    Утверждение «0.8 отсекает дословный повтор и не трогает перекрытие» —
+    количественное, и на синтетической паре его не проверить: там сходство
+    выбирает автор теста. Здесь оно считается по настоящим соседним чанкам.
+    """
+
+    #: Настройка по умолчанию, ради которой всё и проверяется.
+    THRESHOLD = 0.8
+
+    #: Запас между реальным максимумом и порогом. Ниже этого значения порог
+    #: перестал бы быть «только про дословный повтор» и начал бы задевать
+    #: проектное перекрытие в 15%.
+    SAFE_CEILING = 0.5
+
+    def neighbour_pairs(self, corpus: list[ProcessedNote]) -> list[tuple[float, str]]:
+        """Сходство соседних чанков одной секции — тех, что делят перекрытие."""
+        pairs = []
+        for note in corpus:
+            by_section: dict[tuple[str, ...], list] = {}
+            for chunk in note.chunks:
+                by_section.setdefault(chunk.heading_path, []).append(chunk)
+            for chunks in by_section.values():
+                ordered = sorted(chunks, key=lambda chunk: chunk.chunk_index)
+                for left, right in pairwise(ordered):
+                    value = jaccard(shingles(left.text), shingles(right.text))
+                    pairs.append((value, left.chunk_id))
+        return pairs
+
+    def test_designed_overlap_stays_far_below_the_threshold(
+        self, corpus: list[ProcessedNote]
+    ) -> None:
+        pairs = self.neighbour_pairs(corpus)
+        assert pairs, "в корпусе нет ни одной секции, разбитой на несколько чанков"
+
+        worst, where = max(pairs)
+        assert worst < self.SAFE_CEILING, (
+            f"соседние чанки стали похожи на {worst:.3f} ({where}) — "
+            f"порог {self.THRESHOLD} уже небезопасен для перекрытия"
+        )
+
+    def test_no_verbatim_duplicates_in_the_corpus(self, corpus: list[ProcessedNote]) -> None:
+        """Обратная сторона того же утверждения: срабатывать дедупликации не на чем."""
+        texts = [chunk.text for note in corpus for chunk in note.chunks]
+
+        assert len(set(texts)) == len(texts), "в корпусе есть дословно совпадающие чанки"
 
 
 class TestChunkSizes:

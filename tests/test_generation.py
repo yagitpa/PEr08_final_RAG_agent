@@ -322,6 +322,26 @@ class TestCitationsInCode:
         """Ограничение в три цифры пропускало бы [1234] как несуществующий номер."""
         assert unknown_citations("По фрагменту [1234].", available=5) == [1234]
 
+    def test_literal_list_inside_a_fence_is_not_a_citation(self) -> None:
+        """Просмотра назад мало: перед скобкой в `= [256]` стоит пробел."""
+        answer = (
+            "Размерность задаётся так:\n\n"
+            "```python\n"
+            "dims = [256]\n"
+            "shape = [1536]\n"
+            "```\n\n"
+            "Подробности во фрагменте [1]."
+        )
+        assert cited_numbers(answer) == [1]
+        assert unknown_citations(answer, available=2) == []
+
+    def test_literal_list_inline_is_not_a_citation(self) -> None:
+        assert unknown_citations("Пишем `dims = [256]` и всё.", available=2) == []
+
+    def test_citation_glued_to_a_russian_word_counts(self) -> None:
+        """Кириллица перед скобкой — проза, а не обращение к массиву."""
+        assert cited_numbers("Хранятся в виде векторов[1], как описано выше.") == [1]
+
 
 class TestContextBudgetEdges:
     def test_fit_terminates_on_impossible_budget(self) -> None:

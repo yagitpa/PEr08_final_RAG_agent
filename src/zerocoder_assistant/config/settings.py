@@ -137,7 +137,12 @@ class Settings(BaseSettings):
     # ПОРОГА. Сама модель при этом отказывается на 7 отвечаемых вопросах из
     # 40 — но это её решение, а не отсечение: фрагменты порог пропустил.
     relevance_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
-    dedup_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+    # Строго больше нуля: при нуле похожими считаются ЛЮБЫЕ два фрагмента
+    # (`jaccard >= 0` истинно всегда) и от выдачи остаётся один. Значение
+    # 0.8 отсекает дословный повтор и заведомо не трогает перекрытие
+    # чанков — по замерам на корпусе соседние чанки одной секции дают
+    # сходство около 0.09, а максимум по всем парам выдачи — 0.200.
+    dedup_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
     max_context_tokens: int = Field(default=3000, ge=200)
     max_answer_tokens: int = Field(default=1000, ge=100, le=16000)
     history_pairs: int = Field(default=5, ge=0, le=50)

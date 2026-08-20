@@ -287,11 +287,19 @@ RAGAS ставится в **отдельное** окружение: он тре
 python -m venv .venv-eval
 ```
 
+Windows:
+
 ```bash
 .venv-eval\Scripts\python.exe -m pip install -r requirements-eval.txt
 ```
 
-Затем в `.env`:
+macOS/Linux:
+
+```bash
+.venv-eval/bin/python -m pip install -r requirements-eval.txt
+```
+
+Затем в `.env` — путь к интерпретатору этого окружения:
 
 ```
 RAGAS_PYTHON=./.venv-eval/Scripts/python.exe

@@ -5,10 +5,10 @@
 импортирует ни одного модуля `zerocoder_assistant` и обходится стандартной
 библиотекой плюс сам RAGAS. Так сделано не из аккуратности, а по необходимости.
 
-RAGAS 0.2.15 тянет за собой `langchain-openai`, который ограничивает `openai`
-версией 2.x. Ядро проекта работает на `openai` 3.x. Поставить RAGAS в то же
-окружение — значит молча откатить клиент, которым ядро делает каждый запрос
-эмбеддингов и каждый вызов модели. Проверено установкой: 3.3.0 -> 2.54.0.
+RAGAS требует `langchain-openai`, который держит `openai` на 1.x-2.x. Ядро
+проекта работает на `openai` 3.x. Поставить RAGAS в то же окружение — значит
+молча откатить клиент, которым ядро делает каждый запрос эмбеддингов и каждый
+вызов модели. Проверено установкой: ядро на 3.3.0, окружение оценки — на 1.109.1.
 
 Поэтому окружения два, а связаны они файлом на диске — ровно как связаны
 пайплайны в остальной архитектуре. Ядро пишет набор данных в JSONL, этот
@@ -70,11 +70,20 @@ def build_metrics(names, llm, embeddings):
     всё равно должен читаться и печатать `--help`, иначе разобраться, чего не
     хватает, можно будет только по трассировке.
     """
-    from ragas.metrics import (
-        Faithfulness,
-        LLMContextPrecisionWithoutReference,
-        ResponseRelevancy,
-    )
+    try:
+        # Путь, который RAGAS считает правильным начиная с 0.4: старый работает,
+        # но печатает предупреждение об удалении в v1.0.
+        from ragas.metrics.collections import (
+            Faithfulness,
+            LLMContextPrecisionWithoutReference,
+            ResponseRelevancy,
+        )
+    except ImportError:
+        from ragas.metrics import (
+            Faithfulness,
+            LLMContextPrecisionWithoutReference,
+            ResponseRelevancy,
+        )
 
     available = {
         METRIC_FAITHFULNESS: lambda: Faithfulness(llm=llm),
@@ -175,7 +184,7 @@ def run(
 
     # По умолчанию RAGAS глотает исключения и ставит NaN. Для одного сбойного
     # вопроса это правильно — весь прогон из-за него ронять незачем.
-    result = evaluate(dataset=dataset, metrics=metrics)
+    result = evaluate(dataset=dataset, metrics=metrics, **_asyncio_kwargs(evaluate))
 
     # `result.scores` — список словарей, по одному на вопрос. Средние считаются
     # здесь, а не берутся из представления RAGAS: пропуски (None/NaN) надо
@@ -203,15 +212,37 @@ def run(
     return report
 
 
+def _asyncio_kwargs(evaluate) -> dict:
+    """Попросить RAGAS не патчить asyncio, если версия это умеет.
+
+    `nest_asyncio` ломает учёт задач: после патча `asyncio.current_task()`
+    возвращает None, внутренний `asyncio.wait_for` падает, и ВСЕ метрики
+    выходят NaN — молча, потому что исключение проглатывается. Ветка 0.2.x
+    патчит безусловно и на Python 3.14 не считает ничего; 0.4 патчит только
+    под уже запущенным циклом (Jupyter) и принимает этот выключатель.
+
+    Аргумент передаётся по факту наличия в сигнатуре, а не по номеру версии:
+    лишний параметр в старой ветке — это TypeError вместо оценки.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(evaluate).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"allow_nest_asyncio": False} if "allow_nest_asyncio" in parameters else {}
+
+
 def _diagnose(dataset, by_name: dict, failed: list[str]) -> str:
     """Повторить один вопрос по каждой несосчитанной метрике и назвать причину."""
     from ragas import EvaluationDataset, evaluate
 
     reasons = []
     sample = EvaluationDataset(samples=dataset.samples[:1])
+    extra = _asyncio_kwargs(evaluate)
     for name in failed:
         try:
-            evaluate(dataset=sample, metrics=[by_name[name]], raise_exceptions=True)
+            evaluate(dataset=sample, metrics=[by_name[name]], raise_exceptions=True, **extra)
         except Exception as exc:  # причина важнее её типа
             reasons.append(f"{name}: {type(exc).__name__}: {exc}")
         else:

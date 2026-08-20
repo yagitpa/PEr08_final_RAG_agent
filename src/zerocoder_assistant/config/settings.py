@@ -110,7 +110,10 @@ class Settings(BaseSettings):
 
     # --- Пути ---------------------------------------------------------------
     notes_dir: Path = Path("./data/notes")
-    raw_dir: Path = Path("./data/raw")
+    # RAW_DIR здесь нет намеренно. Конвейер авторства (P1) спроектирован, но не
+    # реализован, и сырьё складывать некуда. Настройка, которая ничего не
+    # меняет, хуже её отсутствия: её выставляют и ждут последствий. Вернётся
+    # вместе с командой `notes`.
     chroma_dir: Path = Path("./storage/chroma")
     cache_db: Path = Path("./storage/cache.db")
     prompts_dir: Path = Path("./prompts")
@@ -188,7 +191,7 @@ class Settings(BaseSettings):
 
         Иначе поведение команд зависит от того, из какой папки их запустили.
         """
-        for field in ("notes_dir", "raw_dir", "chroma_dir", "cache_db", "prompts_dir"):
+        for field in ("notes_dir", "chroma_dir", "cache_db", "prompts_dir"):
             value: Path = getattr(self, field)
             if not value.is_absolute():
                 object.__setattr__(self, field, (PROJECT_ROOT / value).resolve())

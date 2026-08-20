@@ -110,7 +110,7 @@ def preview(
     settings = get_settings()
     root = (notes_dir or settings.notes_dir).expanduser()
     if not root.is_dir():
-        raise click.ClickException(f"Каталог конспектов не найден: {root}")
+        raise _missing_notes(root)
 
     config = settings.chunking
     preprocessor = NotePreprocessor(config)
@@ -177,7 +177,7 @@ def build(rebuild: bool, lessons: tuple[str, ...], dry_run: bool) -> None:
 
     settings = get_settings()
     if not settings.notes_dir.is_dir():
-        raise click.ClickException(f"Каталог конспектов не найден: {settings.notes_dir}")
+        raise _missing_notes(settings.notes_dir)
 
     click.echo(f"Конспекты: {settings.notes_dir}")
     click.echo(f"Хранилище: {settings.chroma_dir}")
@@ -221,6 +221,26 @@ def stats() -> None:
 # ---------------------------------------------------------------------------
 # Шаги команды
 # ---------------------------------------------------------------------------
+
+
+def _missing_notes(root: Path) -> click.ClickException:
+    """Отсутствие конспектов — не поломка, а несделанная настройка.
+
+    Это первое, обо что спотыкается человек на свежем клоне: данных в
+    репозитории нет по определению, конспекты у каждого свои. Поэтому
+    сообщение называет не только путь, но и то, что с ним делать.
+    """
+    return click.ClickException(
+        "\n".join(
+            [
+                f"Каталог конспектов не найден: {root}",
+                "Укажите в .env путь к папке с вашими конспектами (.md), например:",
+                "    NOTES_DIR=C:/Users/me/Documents/Конспекты",
+                "Ожидается раскладка <NOTES_DIR>/<Модуль ...>/PErNN_название.md —",
+                "подробнее в README, раздел «Формат конспектов».",
+            ]
+        )
+    )
 
 
 def _process_notes(

@@ -149,6 +149,18 @@ class Settings(BaseSettings):
     #: промпта не отдаёт ответы, посчитанные по прежней редакции.
     answer_prompt_file: str = "rag_answer_v1.md"
 
+    # --- Оценка через RAGAS (этап 8) ----------------------------------------
+    #: Интерпретатор ОТДЕЛЬНОГО окружения, в котором стоит RAGAS.
+    #:
+    #: Не «путь к пакету» и не флаг «включить»: RAGAS невозможно поставить рядом
+    #: с ядром. Он тянет langchain-openai, который держит openai на 2.x, а ядро
+    #: работает на 3.x — проверено установкой, клиент откатывается с 3.3.0 до
+    #: 2.54.0. Поэтому окружения два, а связаны они файлом на диске.
+    #:
+    #: None означает «оценка через RAGAS не настроена». Это не ошибка: команда
+    #: скажет, чего не хватает, и завершится успехом.
+    ragas_python: Path | None = None
+
     log_level: str = "INFO"
 
     @model_validator(mode="after")
@@ -161,6 +173,10 @@ class Settings(BaseSettings):
             value: Path = getattr(self, field)
             if not value.is_absolute():
                 object.__setattr__(self, field, (PROJECT_ROOT / value).resolve())
+        # Необязательный путь раскрывается по тем же правилам, но только если
+        # задан: None здесь — законное значение «оценка не настроена».
+        if self.ragas_python is not None and not self.ragas_python.is_absolute():
+            object.__setattr__(self, "ragas_python", (PROJECT_ROOT / self.ragas_python).resolve())
         return self
 
     @property

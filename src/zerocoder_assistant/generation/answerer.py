@@ -129,14 +129,27 @@ class Answerer:
         top_k: int | None = None,
         where: dict[str, Any] | None = None,
         use_cache: bool = True,
+        use_answer_cache: bool = True,
     ) -> Answer:
-        """Ответить на вопрос, опираясь только на базу знаний."""
+        """Ответить на вопрос, опираясь только на базу знаний.
+
+        `use_answer_cache` выключает ТОЛЬКО третий уровень, оставляя первые два.
+        Это нужно оценке через RAGAS: ей мало текста ответа, она сверяет его с
+        фрагментами, а L3 хранит ответ и список источников, но не сами
+        фрагменты. Готовый ответ из кэша пришёл бы без контекста, и оценивать
+        было бы нечего. Отключать при этом весь кэш незачем — L1 и L2 стоят
+        денег и от наличия контекста не зависят.
+        """
         watch = Stopwatch()
         search_query = history.search_query(question) if history else question
 
         # Кэш ответов подключается, только когда история пуста: ключ не знает о
         # предыдущих репликах и на «а подробнее?» отдал бы чужое продолжение.
-        cache = self._cache if use_cache and (history is None or history.is_empty) else None
+        cache = (
+            self._cache
+            if use_cache and use_answer_cache and (history is None or history.is_empty)
+            else None
+        )
         key = self._answer_key(question, top_k, where) if cache is not None else None
 
         if cache is not None and key is not None:

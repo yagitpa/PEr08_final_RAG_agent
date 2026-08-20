@@ -122,6 +122,7 @@ class Evaluator:
         top_k: int | None = None,
         where: dict[str, Any] | None = None,
         use_cache: bool = True,
+        use_answer_cache: bool = True,
         answerer: Answerer | None = None,
     ) -> EvaluationReport:
         """Прогнать набор и собрать сводку.
@@ -130,7 +131,7 @@ class Evaluator:
         должен даже уметь позвать модель, иначе однажды позовёт.
         """
         outcomes = [
-            self._evaluate(question, top_k, where, use_cache, answerer)
+            self._evaluate(question, top_k, where, use_cache, use_answer_cache, answerer)
             for question in _progress(golden.questions)
         ]
         usage = self._cache.snapshot_usage() if self._cache is not None else None
@@ -146,6 +147,7 @@ class Evaluator:
         top_k: int | None,
         where: dict[str, Any] | None,
         use_cache: bool,
+        use_answer_cache: bool,
         answerer: Answerer | None,
     ) -> QuestionOutcome:
         watch = Stopwatch()
@@ -157,9 +159,14 @@ class Evaluator:
             chunks, answer, invented, generated = result.chunks, None, (), False
             from_cache = result.from_cache
             best = result.top_candidate_similarity
+            contexts: tuple[str, ...] = ()
         else:
             reply = answerer.answer(
-                question.question, top_k=top_k, where=where, use_cache=use_cache
+                question.question,
+                top_k=top_k,
+                where=where,
+                use_cache=use_cache,
+                use_answer_cache=use_answer_cache,
             )
             retrieval = reply.retrieval
             chunks = retrieval.chunks if retrieval else []
@@ -171,6 +178,7 @@ class Evaluator:
             # второму рубежу как его работа.
             generated = reply.grounded
             best = retrieval.top_candidate_similarity if retrieval else None
+            contexts = tuple(chunk.text for chunk in chunks)
 
         return QuestionOutcome(
             question=question,
@@ -182,6 +190,7 @@ class Evaluator:
             generated=generated,
             unknown_citations=invented,
             best_similarity=best,
+            contexts=contexts,
         )
 
     # -- подбор порога -------------------------------------------------------

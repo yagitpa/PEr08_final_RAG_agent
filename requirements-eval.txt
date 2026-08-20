@@ -1,0 +1,55 @@
+# Зависимости оценки через RAGAS.
+#
+# ЭТОТ ФАЙЛ НЕ СТАВИТСЯ В ОКРУЖЕНИЕ ЯДРА. Не «желательно не ставить», а нельзя:
+# RAGAS тянет langchain-openai, который держит openai на версии 2.x, тогда как
+# ядро работает на 3.x. Проверено установкой в чистое окружение — клиент
+# откатывается с openai 3.3.0 до 2.54.0, то есть подменяется ровно тот клиент,
+# которым ядро делает каждый вызов модели и каждый запрос эмбеддингов.
+#
+# Поэтому окружения два, а связаны они файлом на диске: ядро пишет набор данных
+# в JSONL, оценщик читает его своим интерпретатором. Ни одна библиотека границу
+# не пересекает.
+#
+# --- Установка ---------------------------------------------------------------
+#
+#   py -3.14 -m venv .venv-eval
+#   .venv-eval\Scripts\python.exe -m pip install -r requirements-eval.txt
+#
+# Затем прописать интерпретатор в .env:
+#
+#   RAGAS_PYTHON=./.venv-eval/Scripts/python.exe
+#
+# После этого работает `zassist eval ragas`. Без этой настройки команда честно
+# скажет, чего не хватает, и завершится успехом — оценка необязательна.
+#
+# --- Почему версии зафиксированы ---------------------------------------------
+#
+# `pip install ragas` без границы ставит 0.4.x, и уже `import ragas` падает с
+# ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'
+# — RAGAS обращается к модулю VertexAI, который из актуального
+# langchain-community убрали. Это разрыв совместимости на стороне библиотек, и
+# кодом проекта он не чинится.
+#
+# Набор ниже подобран под ТУ СТРУКТУРУ ИМПОРТОВ, которую использует
+# evaluation/ragas_runner.py:
+#
+#   from ragas import EvaluationDataset, SingleTurnSample, evaluate
+#   from ragas.metrics import Faithfulness, ResponseRelevancy,
+#                             LLMContextPrecisionWithoutReference
+#   from ragas.llms import LangchainLLMWrapper
+#   from ragas.embeddings import LangchainEmbeddingsWrapper
+#
+# Это важная оговорка: рабочий набор версий зависит от того, что именно
+# импортируется. Для другого набора импортов подходит другая пара версий.
+#
+# Проверено на Python 3.14.4 в августе 2026: все импорты выше отрабатывают.
+# Распространённое предупреждение «RAGAS требует Python 3.11, на 3.13+ конфликты»
+# для этой пары версий не подтвердилось.
+
+ragas==0.2.15
+langchain-community==0.3.27
+
+# Транзитивно приезжают langchain-openai, datasets, pandas, pyarrow и ещё
+# полсотни пакетов. PyTorch среди них НЕТ: sentence-transformers, который
+# упоминается в конспекте PEr08 как утяжеляющий установку, зависимостью RAGAS
+# не является — он попал в requirements.txt того проекта отдельно.
